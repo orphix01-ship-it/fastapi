@@ -18,9 +18,12 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
+@app.get("/")
+def root():
+    return {"ok": True}
+
 @app.post("/chat")
 async def chat(request: Request):
     body = await request.json()
     msg = body.get("message", "")
-    # TODO: call your GPT + Pinecone here instead of echo:
     return {"reply": f"Echo: {msg}"}
