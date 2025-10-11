@@ -4,7 +4,7 @@ import os
 
 app = FastAPI()
 
-ALLOWED = os.getenv("ALLOWED_ORIGINS", "https://app.motion.io,https://fctadvisor.com").split(",")
+ALLOWED = os.getenv("ALLOWED_ORIGINS", "https://app.motion.io,https://www.fctadvisor.com").split(",")
 
 app.add_middleware(
     CORSMiddleware,
