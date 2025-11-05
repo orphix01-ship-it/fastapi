@@ -31,4 +31,37 @@ if host:
 elif index_name:
     idx = pc.Index(index_name)
 else:
-    raise RuntimeError("Set PINECONE_HOS_
+    raise RuntimeError("Set PINECONE_HOST or PINECONE_INDEX")
+
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.get("/rag")
+def rag_endpoint(question: str = Query(..., min_length=3)):
+    try:
+        emb = client.embeddings.create(
+            model="text-embedding-3-small",
+            input=question
+        ).data[0].embedding
+
+        results = idx.query(vector=emb, top_k=5, include_metadata=True)
+
+        # Handle both dict and object styles
+        matches = results["matches"] if isinstance(results, dict) else getattr(results, "matches", [])
+        lines = []
+        for m in matches:
+            meta = m.get("metadata", {}) if isinstance(m, dict) else getattr(m, "metadata", {}) or {}
+            score = m.get("score") if isinstance(m, dict) else getattr(m, "score", 0.0)
+            title = meta.get("title") or meta.get("doc_parent") or "Unknown"
+            level = meta.get("doc_level", "N/A")
+            page  = meta.get("page", "?")
+            lines.append(f"{title} (Level {level} p.{page} – score {float(score):.3f})")
+
+        sources = "\n".join(lines) if lines else "No matches."
+        return {"response": f"🧾 SOURCES\n{sources}\n\n💬 ANSWER\n{question}"}
+    except Exception as e:
+        return {"response": f"Error: {e}"}
+PY
