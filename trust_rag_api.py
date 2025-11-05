@@ -136,33 +136,28 @@ def _dedup_and_rank_sources(matches, top_k: int):
     unique.sort(key=lambda s: (rank.get(s["level"], 99), -s["score"]))
     return unique[:top_k]
 
-def _citation_line(s: dict) -> str:
-    """Title (doc_id, L#, p.#, v.#) — only include fields that exist; titles only."""
-    meta = s.get("meta", {}) or {}
-    parts = []
-    if meta.get("doc_id"):
-        parts.append(str(meta["doc_id"]))
-    parts.append(f"L{s.get('level','N/A')}")
-    parts.append(f"p.{s.get('page','?')}")
-    if s.get("version"):
-        parts.append(f"v.{s['version']}")
-    return f"{s['title']} ({', '.join(parts)})"
-
-def _citations_block(unique):
+def _citations_titles_only(unique):
+    """Return deduplicated title list in precedence order (titles only)."""
     seen = set()
     lines = []
     for s in unique:
-        key = (s["title"], s["level"], s["page"], s.get("version",""))
-        if key in seen:
+        t = s["title"]
+        if t in seen:
             continue
-        seen.add(key)
-        lines.append(_citation_line(s))
-    return "\n".join(lines) if lines else "No relevant material found in the Trust-Law knowledge base."
+        seen.add(t)
+        lines.append(t)
+    return lines
 
-# -------------------- Synthesis: HTML output to match your GPT (no Markdown) --------------------
+# -------------------- Synthesis: HTML only, no forced memo style --------------------
 def synthesize_answer_html(question: str, unique_sources: list[dict], snippets: list[str]) -> str:
+    """
+    Produce comprehensive HTML following the user's requested format (e.g., draft a document
+    if the prompt asks for one). Use ONLY the provided context. If context is empty/insufficient,
+    return exactly: 'No relevant material found in the Trust-Law knowledge base.'
+    Append one 'Citations' block (titles only, deduped) and the standard disclaimer.
+    """
     if not snippets and not unique_sources:
-        return "No relevant material found in the Trust-Law knowledge base."
+        return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
 
     # Build large context
     context, used = "", 0
@@ -181,66 +176,51 @@ def synthesize_answer_html(question: str, unique_sources: list[dict], snippets: 
         if kept >= MAX_SNIPPETS:
             break
 
-    citations = _citations_block(unique_sources)
+    titles = _citations_titles_only(unique_sources)
+    titles_html = "<ul>" + "".join(f"<li>{re.escape(t) if '<' in t else t}</li>" for t in titles) + "</ul>" if titles else "<p>No relevant material found in the Trust-Law knowledge base.</p>"
 
-    # Exact policy/voice, HTML-only output request (no asterisks)
-    policy_block = (
-        "This GPT is configured as a comprehensive fiduciary structuring and compliance engine, designed exclusively for the analysis, "
-        "drafting, and administration of private, non-grantor irrevocable trusts in the context of family offices and complex fiduciary estates. "
-        "Its operational scope encompasses intake, instrument construction, resolutions, administrative oversight, fiduciary accounting, "
-        "and tax compliance pursuant to Subchapter J of the Internal Revenue Code.\n\n"
-        "The system adheres to a juridical hierarchy of interpretive sources:\n"
-        "Statutory law — Internal Revenue Code (26 U.S.C. §§ 641–692, Subchapter J), Treasury Regulations (26 C.F.R. Part 1), Uniform Principal and Income Act.\n"
-        "Judicial precedent — including Gregory v. Helvering, 293 U.S. 465 (1935); Helvering v. Clifford, 309 U.S. 331 (1940); Commissioner v. Estate of Bosch, 387 U.S. 456 (1967); Markosian v. Commissioner, 73 T.C. 1235 (1980).\n"
-        "Revenue rulings and IRS pronouncements — e.g., Rev. Rul. 79-47, 1979-1 C.B. 312; Rev. Rul. 58-190.\n"
-        "Scholarly commentary — Scott & Ascher on Trusts; Bogert, Trusts and Trustees; Restatement (Third) of Trusts; Kurtz & Madoff, Federal Income Taxation of Estates, Trusts and Beneficiaries.\n"
-        "Practice and regulatory guides — IRS Audit Technique Guides, CLE manuals, model provisions, and drafting precedents.\n"
-        "Advanced fiduciary strategies — capital interest certificates, § 642(c)(2) charitable set-asides, § 119 lodging arrangements, unrelated business taxable income (UBTI) compliance, and fiduciary remedial adjustments.\n\n"
-        "Core Functionality: Dynamic Intake & Validation; Instrument Profiling & Generation; Administration & Oversight; Research & Exegesis; Strategic Structuring.\n"
-        "Citation Formatting Rules: Statutes “26 U.S.C. § 641” / “IRC § 641”; Regulations “Treas. Reg. § 1.641(a)-0”; Cases (e.g., Gregory v. Helvering, 293 U.S. 465 (1935)); Revenue Rulings (e.g., Rev. Rul. 79-47, 1979-1 C.B. 312); Restatement (Third) of Trusts § 78 (2007); Treatises (e.g., Scott & Ascher on Trusts § 17.2 (5th ed. 2007)). "
-        "Each substantive proposition shall be footnoted or parenthetically cited to at least one authoritative source.\n"
-        "Behavioral Standards: Operate exclusively in legal register (legalese). Prioritize statutory/doctrinal fidelity; scholarly/practice commentary is subordinate but included. "
-        "All substantive propositions must be grounded in at least one citation. Avoid legal advice or fact-specific application; frame as educational, research-oriented, and referential.\n"
-        "Disclaimer: “This response is provided solely for educational and informational purposes. It does not constitute legal, tax, or financial advice, nor does it establish an attorney-client or fiduciary relationship. Users must consult qualified counsel or a CPA for application of law to specific facts.”\n"
-        "You are a retrieval-augmented legal research assistant. Your only source of information is the connected Trust-Law RAG context below. "
-        "Always rely exclusively on that context; if it is empty or inadequate, respond exactly: “No relevant material found in the Trust-Law knowledge base.” "
-        "Always follow precedence L1 > L2 > L3 > L4 > L5; if conflict, follow L1 and explain.\n"
-    )
-
+    # System: no style override; HTML only; follow user’s requested genre/format
     system_msg = (
-        "You are the 'Private Trust Fiduciary Advisor'. Produce a comprehensive, formal legal analysis. "
-        "Output strictly as clean HTML (no Markdown, no asterisks). Use semantic tags: <h2>, <h3>, <p>, <ul><li>, <strong>, <em>, <blockquote>, <hr>, <sup>…</sup>."
+        "You are the 'Private Trust Fiduciary Advisor'. Produce a comprehensive, formal legal output that matches the user's requested format "
+        "(e.g., if asked to draft a resolution/contract/letter, draft it). Output strictly as clean HTML (no Markdown, no asterisks). "
+        "Use semantic tags: <h1-4>, <p>, <ul><li>, <strong>, <em>, <blockquote>, <hr>, <sup>…</sup>. "
+        "Use ONLY the provided context; do not rely on any internal knowledge."
     )
+
+    # User: pass the question verbatim and the raw context; ask for one citations block (titles only) + disclaimer
     user_msg = (
-        f"{policy_block}\n"
-        f"<h2>Question</h2>\n<p>{question}</p>\n"
-        f"<h3>Context (Authoritative Excerpts)</h3>\n<pre>{(context or '').strip()}</pre>\n"
-        f"<p><strong>Task:</strong> Draft a comprehensive memorandum-style analysis in strict legal register, organized by the layered method "
-        f"(Statutory foundation → Regulatory gloss → Judicial precedent → Revenue rulings → Scholarly commentary → Practice guidance → Strategic/administrative implications). "
-        f> Ensure every substantive proposition is grounded in the provided context. Do not rely on any external knowledge.</p>\n"
-        f"<p>Conclude with exactly one block:</p>\n"
-        f"<hr><h3>Citations</h3>\n<pre>{citations}</pre>\n"
-        f"<p><em>Then append this single-line disclaimer verbatim:</em></p>\n"
-        f"<p><em>This response is provided solely for educational and informational purposes. It does not constitute legal, tax, or financial advice, nor does it establish an attorney-client or fiduciary relationship. Users must consult qualified counsel or a CPA for application of law to specific facts.</em></p>"
+        f"<h2>Request</h2><p>{question}</p>"
+        f"<h3>Context</h3><pre>{(context or '').strip()}</pre>"
+        f"<p>Instructions:</p>"
+        f"<ul>"
+        f"<li>Use only the context above; if insufficient, respond exactly: <code>No relevant material found in the Trust-Law knowledge base.</code></li>"
+        f"<li>Do not force a memorandum style; follow the user's requested format and genre.</li>"
+        f"<li>Do not include any separate sources table; include exactly one <strong>Citations</strong> block at the end with titles only (deduplicated).</li>"
+        f"<li>After citations, append this one-line disclaimer verbatim: "
+        f"<em>This response is provided solely for educational and informational purposes. It does not constitute legal, tax, or financial advice, nor does it establish an attorney-client or fiduciary relationship. Users must consult qualified counsel or a CPA for application of law to specific facts.</em></li>"
+        f"</ul>"
+        f"<hr><h3>Citations</h3>{titles_html}"
     )
 
     try:
         chat = client.chat.completions.create(
             model=SYNTH_MODEL,
             temperature=0.15,
-            max_tokens=2200,   # allow full, formatted memos
+            max_tokens=2200,   # allow full, formatted output
             messages=[{"role":"system","content":system_msg},
                       {"role":"user","content":user_msg}],
         )
         html = (chat.choices[0].message.content or "").strip()
-        # Basic guard: ensure it's HTML-like; if model returned plain text, wrap in <p>
+        if not html:
+            return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
+        # If model returned plain text, wrap into HTML
         if "<" not in html:
-            html = "<p>" + html.replace("\n","<br>") + "</p>"
+            html = "<div><p>" + html.replace("\n","<br>") + "</p></div>"
         return html
     except Exception as e:
         return f"<p><em>(Synthesis unavailable: {e})</em></p>"
 
-# -------------------- Widget (multiline textarea + auto-resize, black text, no sources box) --------------------
+# -------------------- Widget (multiline textarea + auto-resize, black text) --------------------
 WIDGET_HTML = """<!doctype html>
 <html>
 <head>
@@ -253,11 +233,11 @@ WIDGET_HTML = """<!doctype html>
   .wrap{max-width:1000px;margin:0 auto;min-height:calc(100vh - 40px);display:flex;flex-direction:column}
   h1{font-size:22px;margin:0 0 12px;color:var(--ink)}
   form{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start;margin:12px 0}
-  textarea{flex:1;min-height:120px;max-height:50vh;resize:vertical;padding:12px;border:1px solid #d0d0d6;border-radius:10px;color:var(--ink);background:#fff;line-height:1.4}
+  textarea{flex:1;min-height:140px;max-height:50vh;resize:vertical;padding:12px;border:1px solid #d0d0d6;border-radius:10px;color:var(--ink);background:#fff;line-height:1.5}
+  textarea::placeholder{color:#888}
   input[type=file]{padding:10px;border:1px dashed #c8ccd3;border-radius:10px;background:#fff;color:var(--ink)}
   button{padding:12px 18px;border:none;border-radius:10px;background:var(--brand);color:#fff;cursor:pointer;white-space:nowrap}
   .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px;margin-top:14px;color:var(--ink)}
-  .card h2,.card h3,.card h4{margin:0 0 8px}
   .out{flex:1;overflow:auto}
   .muted{color:var(--muted)}
 </style>
@@ -266,25 +246,18 @@ WIDGET_HTML = """<!doctype html>
   <div class="wrap">
     <h1>Private Trust Fiduciary Advisor</h1>
     <form id="f">
-      <textarea id="q" placeholder="Type your fiduciary/trust question here… (multi-line supported)" required></textarea>
+      <textarea id="q" placeholder="Type your fiduciary/trust question here… (multi-line supported). If you need a specific document (e.g., Trustee Resolution, Certificate of Trust, §642(c)(2) set-aside memo), say so explicitly." required></textarea>
       <input id="file" type="file" multiple accept=".pdf,.txt,.docx"/>
       <button type="submit">Ask</button>
     </form>
     <div id="out" class="out">
-      <div class="card muted">Type your question (the box expands as you type), optionally attach PDF/TXT/DOCX, then click <strong>Ask</strong>.</div>
+      <div class="card muted">Type your question (box expands as you type), optionally attach PDF/TXT/DOCX, then click <strong>Ask</strong>.</div>
     </div>
   </div>
 <script>
 const OUT=document.getElementById('out'),F=document.getElementById('f'),Q=document.getElementById('q'),FILES=document.getElementById('file');
-
-function autoresize(){
-  Q.style.height='auto';
-  const max = window.innerHeight*0.5;
-  Q.style.height = Math.min(Q.scrollHeight, max) + 'px';
-}
-Q.addEventListener('input', autoresize);
-window.addEventListener('resize', autoresize);
-setTimeout(autoresize, 50);
+function autoresize(){ Q.style.height='auto'; const max=window.innerHeight*0.5; Q.style.height=Math.min(Q.scrollHeight,max)+'px'; }
+Q.addEventListener('input',autoresize); window.addEventListener('resize',autoresize); setTimeout(autoresize,60);
 
 async function askRag(q){
   const u=new URL('/rag',location.origin);u.searchParams.set('question',q);u.searchParams.set('top_k','12');
@@ -303,7 +276,7 @@ F.addEventListener('submit',async(e)=>{
     if(FILES.files && FILES.files.length>0){ data=await askReview(Q.value.trim(),FILES.files);}
     else { data=await askRag(Q.value.trim());}
     const ans=data.answer||data.response||'(no answer)';
-    // render as HTML (no escaping) to preserve headings, bold, lists, dividers
+    // render as HTML to preserve headings, bold, lists, dividers
     OUT.innerHTML='<div class="card" style="color:#000;">'+ans+'</div>';
   }catch(err){
     OUT.innerHTML='<div class="card">Error: '+String(err)+'</div>';
@@ -358,7 +331,7 @@ def diag():
         info["openai_error"] = str(e)
     return info
 
-# -------------------- RAG Answer (HTML) --------------------
+# -------------------- RAG Answer (HTML, no forced memo style) --------------------
 @app.get("/rag")
 def rag_endpoint(
     question: str = Query(..., min_length=3),
@@ -396,7 +369,7 @@ def rag_endpoint(
 @app.post("/review")
 def review_endpoint(
     authorization: str | None = Header(default=None),
-    question: str = Form("Please produce a comprehensive, formal legal memorandum analyzing the attached document from a private, non-grantor irrevocable trust perspective."),
+    question: str = Form("Please produce a comprehensive, formal legal output based strictly on the attached materials."),
     files: list[UploadFile] = File(default=[]),
 ):
     require_auth(authorization)
@@ -443,7 +416,6 @@ def review_endpoint(
             else:
                 raise HTTPException(status_code=415, detail=f"Unsupported type: {uf.filename} (only PDF/TXT/DOCX)")
         merged = "\n---\n".join([t for t in texts if t.strip()])
-        # split into large chunks
         chunks, CHUNK = [], 2000
         for i in range(0, len(merged), CHUNK):
             chunks.append(merged[i:i+CHUNK])
