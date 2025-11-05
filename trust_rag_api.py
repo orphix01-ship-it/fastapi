@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pinecone import Pinecone
 from openai import OpenAI
 from prometheus_fastapi_instrumentator import Instrumentator
+from fastapi.responses import HTMLResponse
 import httpx
 import os, time, traceback
 from collections import deque
@@ -83,7 +84,6 @@ else:
 def _clean_openai_key(raw: str) -> str:
     s = (raw or "").strip()
     if not s.startswith("sk-"):
-        # if someone pasted "OPENAI_API_KEY = sk-..." or "=sk-..."
         parts = [t.strip() for t in s.replace("=", " ").split() if t.strip().startswith("sk-")]
         if parts:
             s = parts[-1]
@@ -94,6 +94,81 @@ def _clean_openai_key(raw: str) -> str:
 _openai_key = _clean_openai_key(os.getenv("OPENAI_API_KEY", ""))
 openai_http = httpx.Client(timeout=60.0, trust_env=False)
 client = OpenAI(api_key=_openai_key, http_client=openai_http)
+
+# -------------------- SIMPLE WIDGET PAGE --------------------
+WIDGET_HTML = """<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Private Trust Fiduciary Advisor</title>
+  <style>
+    body{font-family:system-ui,Arial,sans-serif;margin:0;padding:20px;background:#f7f7f8}
+    .wrap{max-width:900px;margin:0 auto}
+    h1{font-size:22px;margin:0 0 12px}
+    form{display:flex;gap:8px;margin:12px 0}
+    input[type=text]{flex:1;padding:12px;border:1px solid #d0d0d6;border-radius:8px}
+    button{padding:12px 16px;border:none;border-radius:8px;background:#0B3B5C;color:#fff;cursor:pointer}
+    .card{background:#fff;border:1px solid #e5e5ea;border-radius:12px;padding:14px;margin-top:12px}
+    .src{font-size:13px;color:#555;margin-top:8px}
+    .muted{color:#777}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Private Trust Fiduciary Advisor</h1>
+    <form id="f">
+      <input id="q" type="text" placeholder="Ask a fiduciary/trust question…" required />
+      <button type="submit">Ask</button>
+    </form>
+    <div id="out" class="muted">Ask something to see results.</div>
+  </div>
+  <script>
+    const OUT = document.getElementById('out');
+    const F = document.getElementById('f');
+    const Q = document.getElementById('q');
+
+    async function ask(q) {
+      OUT.innerHTML = '<div class="card">Working…</div>';
+      const u = new URL('/rag', location.origin);
+      u.searchParams.set('question', q);
+      u.searchParams.set('top_k', '5');
+
+      const res = await fetch(u, {
+        headers: {
+          // If you enabled API_TOKEN on the server, uncomment next line and paste the token:
+          // 'Authorization': 'Bearer YOUR_API_TOKEN'
+        }
+      });
+      const data = await res.json();
+
+      const answer = data.answer || data.response || '(no answer)';
+      const sources = data.sources || [];
+
+      let html = '<div class="card"><strong>Answer</strong><br>' + escapeHtml(answer).replaceAll('\\n','<br>') + '</div>';
+      if (sources.length) {
+        html += '<div class="card"><strong>Sources</strong><div class="src"><ul>';
+        for (const s of sources) {
+          html += `<li>${escapeHtml(s.title || '')} (Level ${escapeHtml(s.level||'')}, p.${escapeHtml(String(s.page||'?'))}, score ${Number(s.score||0).toFixed(3)})</li>`;
+        }
+        html += '</ul></div></div>';
+      }
+      OUT.innerHTML = html;
+    }
+
+    F.addEventListener('submit', (e) => {
+      e.preventDefault();
+      ask(Q.value.trim());
+    });
+
+    function escapeHtml(s){return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+  </script>
+</body>
+</html>"""
+
+@app.get("/widget", response_class=HTMLResponse)
+def widget():
+    return HTMLResponse(WIDGET_HTML)
 
 # -------------------- ENDPOINTS --------------------
 @app.get("/health")
@@ -155,18 +230,15 @@ def rag_endpoint(
 
     t0 = time.time()
     try:
-        # 1) embed
         emb = client.embeddings.create(
             model="text-embedding-3-small",
             input=question
         ).data[0].embedding
 
-        # 2) query pinecone
         flt = {"doc_level": {"$eq": level}} if level else None
         results = idx.query(vector=emb, top_k=top_k, include_metadata=True, filter=flt)
         matches = results["matches"] if isinstance(results, dict) else getattr(results, "matches", [])
 
-        # 3) collect sources
         sources = []
         for m in matches:
             meta  = m.get("metadata", {}) if isinstance(m, dict) else (getattr(m, "metadata", {}) or {})
@@ -176,9 +248,7 @@ def rag_endpoint(
             score = float(m.get("score") if isinstance(m, dict) else getattr(m, "score", 0.0))
             sources.append({"title": title, "level": lvl, "page": str(page), "score": score})
 
-        # 4) (placeholder) — right now we echo question; swap with LLM synthesis later
         answer = question
-
         return {"answer": answer, "sources": sources, "t_ms": int((time.time()-t0)*1000)}
     except HTTPException:
         raise
