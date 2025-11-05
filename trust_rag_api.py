@@ -2,8 +2,8 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pinecone import Pinecone
 from openai import OpenAI
+import os, traceback, json
 import httpx
-import os, traceback
 
 # --- Load .env if present (harmless on Railway) ---
 try:
@@ -19,6 +19,7 @@ for k in (
     "OPENAI_PROXY", "OPENAI_HTTP_PROXY", "OPENAI_HTTPS_PROXY"
 ):
     os.environ.pop(k, None)
+# Do not use any system proxy for these hosts
 os.environ.setdefault("NO_PROXY", "*")
 
 app = FastAPI(title="Private Trust Fiduciary Advisor API")
@@ -29,7 +30,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Pinecone setup ---
+# --- Pinecone ---
 pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
 index_name = os.getenv("PINECONE_INDEX", "").strip()
 host = os.getenv("PINECONE_HOST", "").strip()
@@ -41,9 +42,8 @@ elif index_name:
 else:
     raise RuntimeError("Set PINECONE_HOST or PINECONE_INDEX")
 
-# --- OpenAI client (explicit httpx client with NO proxy) ---
-http_client = httpx.Client(timeout=60.0)  # no proxies arg
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], http_client=http_client)
+# --- OpenAI (use the default client; no custom httpx, no proxies) ---
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 @app.get("/health")
 def health():
@@ -51,15 +51,18 @@ def health():
 
 @app.get("/diag")
 def diag():
-    """Quick diagnostics so 500s become visible."""
+    """Deep diagnostics so we can see exactly what's wrong in prod."""
     info = {
         "has_PINECONE_API_KEY": bool(os.getenv("PINECONE_API_KEY")),
         "has_OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
         "PINECONE_INDEX": index_name or None,
         "PINECONE_HOST": host or None,
+        "OPENAI_BASE_URL": os.getenv("OPENAI_BASE_URL"),
+        "NO_PROXY": os.getenv("NO_PROXY"),
     }
+
+    # Pinecone check
     try:
-        # light control-plane ping
         lst = pc.list_indexes()
         info["pinecone_list_indexes_ok"] = True
         info["pinecone_indexes_count"] = len(lst or [])
@@ -67,8 +70,23 @@ def diag():
         info["pinecone_list_indexes_ok"] = False
         info["pinecone_error"] = str(e)
 
+    # OpenAI direct HTTP sanity (no SDK) to surface TLS/DNS errors
     try:
-        # tiny embed test (cheap) just to verify openai client
+        r = httpx.get(
+            "https://api.openai.com/v1/models",
+            headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
+            timeout=20.0,
+        )
+        info["openai_http_ok"] = (200 <= r.status_code < 500)
+        info["openai_http_status"] = r.status_code
+        if r.status_code != 200:
+            info["openai_http_body"] = r.text[:400]
+    except Exception as e:
+        info["openai_http_ok"] = False
+        info["openai_http_error"] = str(e)
+
+    # OpenAI SDK embeddings check
+    try:
         _ = client.embeddings.create(model="text-embedding-3-small", input="ping").data[0].embedding
         info["openai_embeddings_ok"] = True
     except Exception as e:
@@ -104,6 +122,5 @@ def rag_endpoint(question: str = Query(..., min_length=3)):
         return {"response": f"🧾 SOURCES\n{sources}\n\n💬 ANSWER\n{question}"}
 
     except Exception as e:
-        # print full traceback to Railway logs and surface the message in JSON
         traceback.print_exc()
         return {"response": f"Error: {e.__class__.__name__}: {e}"}
