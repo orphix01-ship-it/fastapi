@@ -2,22 +2,27 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pinecone import Pinecone
 from openai import OpenAI
+import httpx
 import os
 
-# --- Load environment (.env harmless on Railway) ---
+# --- Load .env if present (harmless on Railway) ---
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except Exception:
     pass
 
-# --- SCRUB PROXY VARS to prevent OpenAI client 'proxies' kw errors ---
-for _k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-    os.environ.pop(_k, None)
+# --- SCRUB ALL PROXY VARS (prevents 'proxies' kw leaks into OpenAI client) ---
+for k in (
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "all_proxy",
+    "OPENAI_PROXY", "OPENAI_HTTP_PROXY", "OPENAI_HTTPS_PROXY"
+):
+    os.environ.pop(k, None)
+# ensure no system proxy is honored
+os.environ.setdefault("NO_PROXY", "*")
 
 app = FastAPI(title="Private Trust Fiduciary Advisor API")
-
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,9 +32,9 @@ app.add_middleware(
 
 # --- Pinecone client ---
 pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
-
 index_name = os.getenv("PINECONE_INDEX", "").strip()
 host = os.getenv("PINECONE_HOST", "").strip()
+
 if host:
     idx = pc.Index(host=host)
 elif index_name:
@@ -37,8 +42,14 @@ elif index_name:
 else:
     raise RuntimeError("Set PINECONE_HOST or PINECONE_INDEX")
 
-# --- OpenAI client (NO proxy kw) ---
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+# --- OpenAI client (explicit httpx client with NO proxy) ---
+http_client = httpx.Client(  # no 'proxies' provided
+    timeout=60.0,  # adjust as you like
+)
+client = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+    http_client=http_client,  # forces no proxy kw path
+)
 
 @app.get("/health")
 def health():
@@ -63,7 +74,7 @@ def rag_endpoint(question: str = Query(..., min_length=3)):
         score = m.get("score") if isinstance(m, dict) else getattr(m, "score", 0.0)
         title = meta.get("title") or meta.get("doc_parent") or "Unknown"
         level = meta.get("doc_level", "N/A")
-        page  = meta.get("page", "?")
+        page = meta.get("page", "?")
         lines.append(f"{title} (Level {level} p.{page} – score {float(score):.3f})")
 
     sources = "\n".join(lines) if lines else "No matches."
