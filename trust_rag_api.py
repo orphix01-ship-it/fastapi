@@ -151,7 +151,6 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
     titles = _titles_only(uniq_sources)
     titles_html = "<ul>" + "".join(f"<li>{t}</li>" for t in titles) + "</ul>" if titles else "<p></p>"
 
-    # single user message (no system)
     user_msg = (
         f"<h2>Question</h2>\n<p>{question}</p>\n"
         f"<h3>Context</h3>\n<pre>{context}</pre>\n"
@@ -171,7 +170,7 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
     except Exception as e:
         return f"<p><em>(Synthesis unavailable: {e})</em></p>"
 
-# ========== WIDGET (no avatars, no initial advisor bubble, user bubble light-blue, advisor unboxed) ==========
+# ========== WIDGET (no avatars, no initial advisor bubble, user light-blue, advisor unboxed) ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -181,7 +180,7 @@ WIDGET_HTML = """<!doctype html>
 <style>
   :root{
     --bg:#ffffff; --text:#000000; --border:#e5e5e5; --ring:#d9d9d9;
-    --user:#e8f1ff; /* light blue highlight for user's question */
+    --user:#e8f1ff; /* light blue for user's question */
     --shadow:0 1px 2px rgba(0,0,0,.03), 0 8px 24px rgba(0,0,0,.04);
     --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial;
     --title:"Cinzel",serif;
@@ -197,27 +196,15 @@ WIDGET_HTML = """<!doctype html>
   .container{max-width:900px;margin:0 auto}
   .thread{display:flex;flex-direction:column;gap:16px}
 
-  /* Messages: no avatar, no grid */
   .msg{padding:0;border:0;background:transparent}
+  .msg .bubble{display:inline-block;max-width:80%}
   .msg.user .bubble{
-    background:var(--user);
-    border:1px solid var(--border);
-    border-radius:14px;
-    padding:12px 14px;
-    box-shadow:var(--shadow);
-    display:inline-block;
-    max-width: 80%;
+    background:var(--user); border:1px solid var(--border);
+    border-radius:14px; padding:12px 14px; box-shadow:var(--shadow);
   }
-  .msg.advisor .bubble{
-    /* Advisor answer blends with background (no box) */
-    background:transparent;
-    padding:0;
-    display:block;
-    max-width:100%;
-  }
+  .msg.advisor .bubble{background:transparent; padding:0; max-width:100%}
   .meta{font-size:12px;margin-bottom:6px;color:#000}
 
-  /* Rich content */
   .bubble h1,.bubble h2,.bubble h3{margin:.6em 0 .4em}
   .bubble p{margin:.6em 0}
   .bubble ul{margin:.4em 0 .6em 1.2em}
@@ -231,7 +218,6 @@ WIDGET_HTML = """<!doctype html>
   .input:empty:before{content:attr(data-placeholder);color:#000}
   .send{padding:8px 14px;border-radius:12px;background:#000;color:#fff;border:1px solid #000;cursor:pointer}
 
-  /* Links */
   a{color:#000;text-decoration:underline}
   a:hover{text-decoration:none}
 
@@ -272,54 +258,34 @@ WIDGET_HTML = """<!doctype html>
 
   let lastQuestion = "";
 
-  function now() {
-    return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-  }
+  function now(){ return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) }
 
-  function addMessage(role, html) {
+  function addMessage(role, html){
     const wrap = document.createElement('div');
     wrap.className = 'msg ' + (role === 'user' ? 'user' : 'advisor');
     const meta = `<div class="meta">${role==='user'?'You':'Advisor'} · ${now()}</div>`;
-    const bubbleOpen = `<div class="bubble">`;
-    const bubbleClose = `</div>`;
-    wrap.innerHTML = (role==='user')
-      ? (meta + bubbleOpen + html + bubbleClose)
-      : (meta + bubbleOpen + html + bubbleClose);
+    wrap.innerHTML = meta + `<div class="bubble">${html}</div>`;
     elThread.appendChild(wrap);
     elThread.scrollTop = elThread.scrollHeight;
   }
 
-  // Minimal MD -> HTML (ensures **bold** and *italic* render; no literal asterisks)
+  // Minimal MD -> HTML (ensures bold/italic render as <strong>/<em>)
   function mdToHtml(md){
     if(!md) return '';
-    // If it already looks like HTML, trust it (so <strong>, <em>, etc render).
-    if (/<\w+[^>]*>/.test(md)) return md;
+    if (/<\\w+[^>]*>/.test(md)) return md;
     let h = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-
-    // Code blocks
-    h = h.replace(/```([\s\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
-
-    // Headings
-    h = h.replace(/^######\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\s+(.*)$/gm,'<h5>$1</h5>')
-         .replace(/^####\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\s+(.*)$/gm,'<h3>$1</h3>')
-         .replace(/^##\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\s+(.*)$/gm,'<h1>$1</h1>');
-
-    // Horizontal rule
+    h = h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+    h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>')
+         .replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>')
+         .replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
     h = h.replace(/^---$/gm,'<hr>');
-
-    // Bold/italic – handle **bold**, __bold__, *italic*, _italic_
-    h = h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>')
          .replace(/__(.+?)__/g,'<strong>$1</strong>')
-         .replace(/\*(.+?)\*/g,'<em>$1</em>')
+         .replace(/\\*(.+?)\\*/g,'<em>$1</em>')
          .replace(/_(.+?)_/g,'<em>$1</em>');
-
-    // Lists
-    h = h.replace(/(?:^|\n)[*-]\s+(.*)/g,(m,i)=>`<li>${i}</li>`)
-         .replace(/(<li>.*<\/li>)(\n?)+/gs,m=>`<ul>${m}</ul>`);
-
-    // Paragraphs
-    h = h.replace(/\n{2,}/g,'</p><p>').replace(/^(?!<h\d|<ul|<pre|<hr|<p|<blockquote)(.+)$/gm,'<p>$1</p>');
-
+    h = h.replace(/(?:^|\\n)[*-]\\s+(.*)/g,(m,i)=>`<li>${i}</li>`)
+         .replace(/(<li>.*<\\/li>)(\\n?)+/gs,m=>`<ul>${m}</ul>`);
+    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<pre|<hr|<p|<blockquote)(.+)$/gm,'<p>$1</p>');
     return h;
   }
 
@@ -342,23 +308,19 @@ WIDGET_HTML = """<!doctype html>
   }
 
   function readInput(){
-    // Normalize composer content to plain text with newlines
     const tmp = elInput.cloneNode(true);
     tmp.querySelectorAll('div').forEach(d=>{
-      if (d.innerHTML === "<br>") d.innerHTML = "\n";
+      if (d.innerHTML === "<br>") d.innerHTML = "\\n";
     });
-    const text = tmp.innerText.replace(/\u00A0/g,' ').trim();
+    const text = tmp.innerText.replace(/\\u00A0/g,' ').trim();
     return text;
   }
 
-  async function send(q){
+  async function handleSend(q){
     if(!q) return;
-
-    // Show user's question (light blue bubble)
-    addMessage('user', q.replace(/\n/g,'<br>'));
+    addMessage('user', q.replace(/\\n/g,'<br>'));
     lastQuestion = q;
 
-    // Placeholder while we fetch
     const work = document.createElement('div');
     work.className = 'msg advisor';
     work.innerHTML = `<div class="meta">Advisor · thinking…</div><div class="bubble"><p>Working…</p></div>`;
@@ -368,11 +330,9 @@ WIDGET_HTML = """<!doctype html>
       const files = Array.from(elFile.files || []);
       const data = files.length ? await callReview(q, files) : await callRag(q);
       let html = (data && data.answer) ? data.answer : '';
-      const looksHtml = typeof html==='string' && /<\w+[^>]*>/.test(html);
+      const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
       const rendered = looksHtml ? html : mdToHtml(String(html||''));
-
       work.querySelector('.meta').textContent = 'Advisor · ' + now();
-      // Advisor answer: unboxed, blended
       work.querySelector('.bubble').outerHTML = `<div class="bubble">${rendered}</div>`;
     }catch(e){
       work.querySelector('.meta').textContent = 'Advisor · error';
@@ -380,21 +340,21 @@ WIDGET_HTML = """<!doctype html>
     }
   }
 
-  // Send on Enter; Shift+Enter = newline
+  // Send on Enter; Shift+Enter inserts newline
   elInput.addEventListener('keydown', (ev)=>{
     if (ev.key === 'Enter' && !ev.shiftKey){
       ev.preventDefault();
       const q = readInput();
       if (!q) return;
       elInput.innerHTML = '';
-      send(q);
+      handleSend(q);
     }
   });
   elSend.addEventListener('click', ()=>{
     const q = readInput();
     if (!q) return;
     elInput.innerHTML = '';
-    send(q);
+    handleSend(q);
   });
 </script>
 </body>
@@ -428,7 +388,7 @@ def diag():
         info["error"] = str(e)
     return info
 
-# ========== /search (RAW CONTEXT MODE) ==========
+# ========== /search ==========
 @app.get("/search")
 def search_endpoint(
     question: str = Query(..., min_length=3),
@@ -445,7 +405,6 @@ def search_endpoint(
         res = idx.query(vector=emb, top_k=max(top_k, 12), include_metadata=True, filter=flt)
         matches = res["matches"] if isinstance(res, dict) else getattr(res, "matches", [])
         uniq = _dedup_and_rank_sources(matches, top_k=top_k)
-
         titles = _titles_only(uniq)
         rows = []
         for s in uniq:
@@ -463,7 +422,7 @@ def search_endpoint(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-# ========== /rag (SYNTHESIZED HTML ANSWER) ==========
+# ========== /rag ==========
 @app.get("/rag")
 def rag_endpoint(
     question: str = Query(..., min_length=3),
@@ -487,7 +446,7 @@ def rag_endpoint(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-# ========== /review (PDF/TXT/DOCX) ==========
+# ========== /review ==========
 @app.post("/review")
 def review_endpoint(
     authorization: str | None = Header(default=None),
