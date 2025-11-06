@@ -32,10 +32,12 @@ UPLOAD_MAX_BYTES  = 12 * 1024 * 1024                               # 12 MB per f
 
 app = FastAPI(title="Private Trust Fiduciary Advisor API")
 
+# ✅ FIX: pass the class + kwargs (do not instantiate CORSMiddleware yourself)
 app.add_middleware(
-    CORSMiddleware(
-        allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
-    )
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # optional metrics; harmless if package not installed
@@ -216,7 +218,6 @@ WIDGET_HTML = """<!doctype html>
     max-width: 900px; margin:0 auto; padding:14px 16px;
     display:flex; align-items:center; justify-content:center;
   }
-  /* Title only (no icon), thin weight */
   .title{
     font-family: var(--title);
     font-weight:300; letter-spacing:.2px; color:#000; font-size:20px;
@@ -247,7 +248,6 @@ WIDGET_HTML = """<!doctype html>
   }
   .btn:active{ transform: translateY(1px) }
 
-  /* Light markdown */
   .content h1,.content h2,.content h3{margin:.6em 0 .4em}
   .content p{margin:.6em 0}
   .content ul{margin:.4em 0 .6em 1.2em}
@@ -256,7 +256,6 @@ WIDGET_HTML = """<!doctype html>
   .codebar{display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; font-size:12px; color:#000}
   .copy{border:1px solid var(--border); background:#fff; color:#000; padding:4px 8px; border-radius:8px; cursor:pointer}
 
-  /* Composer */
   .composer{
     position:fixed; bottom:0; left:0; right:0; background:#fff;
     padding:18px 12px; border-top:1px solid var(--border);
@@ -310,7 +309,6 @@ WIDGET_HTML = """<!doctype html>
     </div>
   </main>
 
-  <!-- Composer -->
   <div class="composer">
     <div class="inner">
       <div class="bar">
