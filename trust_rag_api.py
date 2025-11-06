@@ -33,8 +33,9 @@ UPLOAD_MAX_BYTES  = 12 * 1024 * 1024                               # 12 MB per f
 app = FastAPI(title="Private Trust Fiduciary Advisor API")
 
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+    CORSMiddleware(
+        allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+    )
 )
 
 # optional metrics; harmless if package not installed
@@ -95,7 +96,6 @@ def _extract_snippet(meta: dict) -> str:
     return ""
 
 def _clean_title(title: str) -> str:
-    # strip level prefixes, hashes, OCR suffixes, long filenames; keep clean human title
     t = (title or "Unknown")
     t = re.sub(r'^[Ll]\d[_\-:\s]+', '', t)
     t = re.sub(r'(?i)\bocr\b', '', t)
@@ -137,17 +137,15 @@ def _titles_only(uniq_sources: list[dict]) -> list[str]:
 # ========== SYNTHESIS (NO SYSTEM MESSAGE) ==========
 def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]) -> str:
     """
-    Send only a single user message (no system message), so your Custom GPT’s own policy governs style.
-    We just provide the question + raw context and a *separate* citation title list.
+    Send only a single user message (no system message).
     """
     if not snippets and not uniq_sources:
         return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
 
-    # Build large context block
     buf, used, kept = [], 0, 0
     for s in snippets:
         s = s.strip()
-        if not s: 
+        if not s:
             continue
         if used + len(s) > MAX_CONTEXT_CHARS:
             break
@@ -156,11 +154,9 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
             break
     context = "\n---\n".join(buf)
 
-    # titles only (deduped, precedence applied)
     titles = _titles_only(uniq_sources)
     titles_html = "<ul>" + "".join(f"<li>{t}</li>" for t in titles) + "</ul>" if titles else "<p></p>"
 
-    # Only a user message (no system); no style instructions.
     user_msg = (
         f"<h2>Question</h2>\n<p>{question}</p>\n"
         f"<h3>Context</h3>\n<pre>{context}</pre>\n"
@@ -174,7 +170,6 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
             max_tokens=2200,
             messages=[{"role": "user", "content": user_msg}],
         )
-        # openai>=1.40: choices[0] path preserved for back-compat
         html = (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content.strip()
         if not html:
             return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
@@ -184,40 +179,27 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
     except Exception as e:
         return f"<p><em>(Synthesis unavailable: {e})</em></p>"
 
-# ========== CHATGPT-STYLE WIDGET (FULL PAGE) ==========
+# ========== CHAT WIDGET (ALL WHITE, BLACK TEXT, CINZEL TITLE, "ADVISOR") ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Private Trust Fiduciary Advisor</title>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
-  /* ====== ChatGPT-like font stack ======
-     If you have a Söhne webfont license, uncomment and point src: to your files.
-  @font-face{
-    font-family: "Söhne";
-    src: url("/fonts/soehne-var.woff2") format("woff2");
-    font-weight: 100 900; font-style: normal; font-display: swap;
-  }
-  @font-face{
-    font-family: "Söhne";
-    src: url("/fonts/soehne-italic-var.woff2") format("woff2");
-    font-weight: 100 900; font-style: italic; font-display: swap;
-  }
-  */
   :root{
-    --bg:#f7f7f8;
+    --bg:#ffffff;
     --panel:#ffffff;
-    --text:#0c0c0d;
-    --muted:#6b7280;
-    --border:#e5e7eb;
-    --ring:#d1d5db;
-    --user:#e5f0ff;
-    --assistant:#ffffff;
+    --text:#000000;
+    --muted:#000000;
+    --border:#e5e5e5;
+    --ring:#d9d9d9;
     --radius:16px;
     --radius-sm:12px;
-    --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.06);
+    --shadow: 0 1px 2px rgba(0,0,0,.03), 0 8px 24px rgba(0,0,0,.04);
     --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, "Cascadia Mono", "Segoe UI Mono", "Roboto Mono", "Oxygen Mono", "Ubuntu Mono", "Courier New", monospace;
-    --font: "Söhne", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    --title: "Cinzel", serif;
   }
   *{box-sizing:border-box}
   html,body{height:100%}
@@ -226,113 +208,90 @@ WIDGET_HTML = """<!doctype html>
     font: 16px/1.6 var(--font);
   }
 
-  .app{
-    display:flex; flex-direction:column; height:100vh; width:100%;
-  }
+  .app{display:flex; flex-direction:column; height:100vh; width:100%}
   .header{
-    position:sticky; top:0; backdrop-filter:saturate(180%) blur(8px);
-    background:rgba(247,247,248,.7); border-bottom:1px solid var(--border);
-    z-index:10;
+    position:sticky; top:0; background:#fff; border-bottom:1px solid var(--border); z-index:10;
   }
   .header .inner{
-    max-width: 900px; margin:0 auto; padding:12px 16px;
-    display:flex; align-items:center; gap:8px;
+    max-width: 900px; margin:0 auto; padding:14px 16px;
+    display:flex; align-items:center; justify-content:center;
   }
-  .logo{width:28px;height:28px;border-radius:8px;background:#111;}
-  .title{font-weight:600}
+  /* Title only (no icon), thin weight */
+  .title{
+    font-family: var(--title);
+    font-weight:300; letter-spacing:.2px; color:#000; font-size:20px;
+  }
 
-  .main{
-    flex:1; overflow:auto; padding: 24px 12px 140px; /* space for composer */
-  }
+  .main{flex:1; overflow:auto; padding: 24px 12px 140px}
   .container{max-width:900px;margin:0 auto}
 
-  /* Conversation */
   .thread{display:flex; flex-direction:column; gap:16px}
   .msg{
     display:grid; grid-template-columns: 40px 1fr; gap:12px;
     padding:16px; border:1px solid var(--border); border-radius: var(--radius-sm);
-    background:var(--assistant); box-shadow: var(--shadow);
+    background:var(--panel); box-shadow: var(--shadow);
   }
-  .msg.user{ background:var(--user) }
   .avatar{
-    width:40px; height:40px; border-radius:8px; background:#111; color:#fff;
+    width:40px; height:40px; border-radius:8px; background:#000; color:#fff;
     display:flex; align-items:center; justify-content:center; font-weight:700;
   }
-  .avatar.user{ background:#1d4ed8 }
+  .avatar.user{ background:#000 }
   .content{min-width:0}
   .meta{
-    display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); margin-bottom:8px;
+    display:flex; align-items:center; gap:8px; font-size:12px; color:#000; margin-bottom:8px;
   }
   .actions{ display:flex; gap:8px; margin-top:10px; }
   .btn{
-    border:1px solid var(--border); background:#fff; color:#111;
+    border:1px solid var(--border); background:#fff; color:#000;
     padding:6px 10px; border-radius:10px; font-size:12px; cursor:pointer;
   }
   .btn:active{ transform: translateY(1px) }
 
-  /* Markdown-ish rendering */
+  /* Light markdown */
   .content h1,.content h2,.content h3{margin:.6em 0 .4em}
   .content p{margin:.6em 0}
   .content ul{margin:.4em 0 .6em 1.2em}
-  .content code{font-family:var(--mono); background:#f3f4f6; padding:.1em .3em; border-radius:6px}
-  .content pre{background:#0b1020; color:#e6edf3; padding:12px; border-radius:12px; overflow:auto}
-  .codebar{display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; font-size:12px; color:#c7cbd1}
-  .copy{border:1px solid #2b3245; background:#111827; color:#e6edf3; padding:4px 8px; border-radius:8px; cursor:pointer}
+  .content code{font-family:var(--mono); background:#fff; border:1px solid var(--border); padding:.1em .3em; border-radius:6px; color:#000}
+  .content pre{background:#fff; color:#000; border:1px solid var(--border); padding:12px; border-radius:12px; overflow:auto}
+  .codebar{display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; font-size:12px; color:#000}
+  .copy{border:1px solid var(--border); background:#fff; color:#000; padding:4px 8px; border-radius:8px; cursor:pointer}
 
-  /* Sticky composer (ChatGPT-like) */
+  /* Composer */
   .composer{
-    position:fixed; bottom:0; left:0; right:0; background:linear-gradient(to top, rgba(247,247,248,1), rgba(247,247,248,.8) 60%, rgba(247,247,248,0));
+    position:fixed; bottom:0; left:0; right:0; background:#fff;
     padding:18px 12px; border-top:1px solid var(--border);
   }
   .composer .inner{max-width:900px; margin:0 auto}
   .bar{
-    display:flex; align-items:flex-end; gap:8px; background:var(--panel);
+    display:flex; align-items:flex-end; gap:8px; background:#fff;
     border:1px solid var(--ring); border-radius: 22px; padding:8px; box-shadow: var(--shadow);
   }
   .input{
     flex:1; min-height:24px; max-height:160px; overflow:auto; outline:none;
-    padding:8px 10px; border-radius:16px; font: 16px/1.5 var(--font);
+    padding:8px 10px; border-radius:16px; font: 16px/1.5 var(--font); color:#000;
   }
-  .input:empty:before{content:attr(data-placeholder); color:#9ca3af}
+  .input:empty:before{content:attr(data-placeholder); color:#000}
   .iconbtn{
     width:36px; height:36px; border-radius:12px; border:1px solid var(--border);
-    background:#fff; display:flex; align-items:center; justify-content:center; cursor:pointer;
+    background:#fff; display:flex; align-items:center; justify-content:center; cursor:pointer; color:#000;
   }
   .send{
-    padding:8px 14px; border-radius:12px; background:#111; color:#fff; border:1px solid #111; cursor:pointer;
+    padding:8px 14px; border-radius:12px; background:#000; color:#fff; border:1px solid #000; cursor:pointer;
   }
 
-  /* Subtle link style (like ChatGPT) */
-  a{color:#065fd4; text-decoration:none}
-  a:hover{text-decoration:underline}
+  a{color:#000; text-decoration:underline}
+  a:hover{text-decoration:none}
 
-  /* Hidden native file input */
   #file{position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(1px,1px,1px,1px)}
   .filelabel{cursor:pointer}
 
-  /* Utility */
   .hidden{display:none}
-
-  /* Optional: dark mode */
-  @media (prefers-color-scheme: dark){
-    :root{
-      --bg:#0b0c0f; --panel:#111318; --text:#e7e8ea; --muted:#9aa0a6; --border:#24262b; --ring:#2a2d33;
-      --user:#0f172a; --assistant:#0f1115; --shadow: none;
-    }
-    .logo{background:#e7e8ea}
-    .send{background:#e7e8ea; color:#111; border-color:#e7e8ea}
-    .btn{background:#0f1115; color:#e7e8ea}
-    .content code{background:#1b1e25}
-    .content pre{background:#0f172a}
-    .copy{border-color:#2b3245; background:#0f172a}
-  }
 </style>
 </head>
 <body>
 <div class="app">
   <div class="header">
     <div class="inner">
-      <div class="logo" aria-hidden="true"></div>
       <div class="title">Private Trust Fiduciary Advisor</div>
     </div>
   </div>
@@ -340,10 +299,10 @@ WIDGET_HTML = """<!doctype html>
   <main class="main">
     <div class="container">
       <div id="thread" class="thread">
-        <div class="msg assistant">
+        <div class="msg advisor">
           <div class="avatar">A</div>
           <div class="content">
-            <div class="meta">Assistant · Ready</div>
+            <div class="meta">Advisor · Ready</div>
             <p>Ask anything about trusts. Attach a PDF/DOCX/TXT if you want me to review it.</p>
           </div>
         </div>
@@ -356,19 +315,17 @@ WIDGET_HTML = """<!doctype html>
     <div class="inner">
       <div class="bar">
         <label class="iconbtn filelabel" title="Attach file">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="M8 12v5a4 4 0 1 0 8 0V7a3 3 0 0 0-6 0v8a2 2 0 1 0 4 0V9" stroke="#111" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
+          <span style="font-size:14px">📎</span>
           <input id="file" type="file" multiple accept=".pdf,.txt,.docx"/>
         </label>
-        <div id="input" class="input" role="textbox" aria-multiline="true" contenteditable="true" data-placeholder="Message ChatGPT… (Shift+Enter for newline)"></div>
+        <div id="input" class="input" role="textbox" aria-multiline="true" contenteditable="true" data-placeholder="Message the Advisor… (Shift+Enter for newline)"></div>
         <button id="send" class="send" title="Send">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="m5 12 14-7-4 14-3-5-7-2z" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
       </div>
-      <div style="margin-top:8px; color:#6b7280; font-size:12px;">We don’t store files. Generation may use your private vector index only.</div>
+      <div style="margin-top:8px; color:#000; font-size:12px;">We don’t store files. Generation may use your private vector index only.</div>
     </div>
   </div>
 </div>
@@ -387,13 +344,13 @@ WIDGET_HTML = """<!doctype html>
 
   function addMessage(role, html, rawMd=null) {
     const wrap = document.createElement('div');
-    wrap.className = 'msg ' + (role === 'user' ? 'user' : 'assistant');
+    wrap.className = 'msg ' + (role === 'user' ? 'user' : 'advisor');
     wrap.innerHTML = `
       <div class="avatar ${role==='user'?'user':''}">${role==='user'?'U':'A'}</div>
       <div class="content">
-        <div class="meta">${role==='user'?'You':'Assistant'} · ${now()}</div>
+        <div class="meta">${role==='user'?'You':'Advisor'} · ${now()}</div>
         <div class="body">${html}</div>
-        ${role==='assistant' ? `
+        ${role!=='user' ? `
           <div class="actions">
             <button class="btn" data-action="copy-answer">Copy</button>
             <button class="btn" data-action="regenerate">Regenerate</button>
@@ -404,7 +361,6 @@ WIDGET_HTML = """<!doctype html>
     elThread.appendChild(wrap);
     elThread.scrollTop = elThread.scrollHeight;
 
-    // Wire up action buttons
     wrap.querySelectorAll('.btn').forEach(btn=>{
       btn.addEventListener('click', ()=>{
         const act = btn.dataset.action;
@@ -416,14 +372,12 @@ WIDGET_HTML = """<!doctype html>
         } else if (act === 'regenerate') {
           if (lastQuestion) send(lastQuestion, true);
         } else if (act === 'show-sources') {
-          // Toggle citations list if present
           const c = wrap.querySelector('.citations');
           if (c) c.classList.toggle('hidden');
         }
       });
     });
 
-    // Enhance code blocks with copy bars
     wrap.querySelectorAll('pre').forEach(pre=>{
       if (pre.dataset.wired) return;
       pre.dataset.wired = "1";
@@ -440,10 +394,8 @@ WIDGET_HTML = """<!doctype html>
     });
   }
 
-  // Lightweight MD→HTML (keeps your passthrough HTML)
   function mdToHtml(md){
     if(!md) return '';
-    // If it already looks like HTML, just trust it.
     if (/<\\w+[^>]*>/.test(md)) return md;
     let h = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     h = h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
@@ -475,7 +427,6 @@ WIDGET_HTML = """<!doctype html>
   }
 
   function readInput(){
-    // Normalize <div><br></div> to newlines
     const tmp = elInput.cloneNode(true);
     tmp.querySelectorAll('div').forEach(d=>{
       if (d.innerHTML === "<br>") d.innerHTML = "\\n";
@@ -488,13 +439,11 @@ WIDGET_HTML = """<!doctype html>
     if(!q) return;
     if(!isRegen){
       lastQuestion = q;
-      // Show user bubble
       addMessage('user', q.replace(/\\n/g,'<br>'));
     }
-    // Show working assistant bubble
     const work = document.createElement('div');
-    work.className = 'msg assistant';
-    work.innerHTML = '<div class="avatar">A</div><div class="content"><div class="meta">Assistant · thinking…</div><div class="body"><p>Working…</p></div></div>';
+    work.className = 'msg advisor';
+    work.innerHTML = '<div class="avatar">A</div><div class="content"><div class="meta">Advisor · thinking…</div><div class="body"><p>Working…</p></div></div>';
     elThread.appendChild(work); elThread.scrollTop = elThread.scrollHeight;
 
     try{
@@ -504,18 +453,15 @@ WIDGET_HTML = """<!doctype html>
       const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
       const rendered = looksHtml ? html : mdToHtml(String(html||''));
 
-      // Replace the working bubble with final answer (plus hidden citations list if present in html)
-      work.querySelector('.meta').textContent = 'Assistant · ' + now();
+      work.querySelector('.meta').textContent = 'Advisor · ' + now();
       work.querySelector('.body').innerHTML = rendered;
 
-      // If your synthesis includes a <ul> of citations, optionally mark it for toggle
-      const cites = work.querySelector('h3, h4, h5, h6');
-      if (cites && /citation/i.test(cites.textContent)) {
-        const list = cites.nextElementSibling;
+      const citesHeader = Array.from(work.querySelectorAll('h3, h4, h5, h6')).find(h=>/citation/i.test(h.textContent));
+      if (citesHeader) {
+        const list = citesHeader.nextElementSibling;
         if (list && (list.tagName === 'UL' || list.tagName === 'OL')) {
           list.classList.add('citations','hidden');
         }
-        // Add action row if missing
         let actions = work.querySelector('.actions');
         if (!actions) {
           actions = document.createElement('div');
@@ -531,7 +477,6 @@ WIDGET_HTML = """<!doctype html>
         });
       }
 
-      // Wire copy/regenerate for this bubble
       let actions = work.querySelector('.actions');
       if (!actions) {
         actions = document.createElement('div');
@@ -551,7 +496,6 @@ WIDGET_HTML = """<!doctype html>
         }
       }));
 
-      // Add code copy bars
       work.querySelectorAll('pre').forEach(pre=>{
         if (pre.dataset.wired) return;
         pre.dataset.wired = "1";
@@ -567,12 +511,11 @@ WIDGET_HTML = """<!doctype html>
       });
 
     }catch(e){
-      work.querySelector('.meta').textContent = 'Assistant · error';
+      work.querySelector('.meta').textContent = 'Advisor · error';
       work.querySelector('.body').innerHTML = '<p style="color:#b91c1c">Error: '+(e && e.message ? e.message : String(e))+'</p>';
     }
   }
 
-  // Send on Enter, newline on Shift+Enter — like ChatGPT
   elInput.addEventListener('keydown', (ev)=>{
     if (ev.key === 'Enter' && !ev.shiftKey){
       ev.preventDefault();
@@ -644,7 +587,6 @@ def search_endpoint(
         matches = res["matches"] if isinstance(res, dict) else getattr(res, "matches", [])
         uniq = _dedup_and_rank_sources(matches, top_k=top_k)
 
-        # build raw payload
         titles = _titles_only(uniq)
         rows = []
         for s in uniq:
