@@ -184,6 +184,7 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
     except Exception as e:
         return f"<p><em>(Synthesis unavailable: {e})</em></p>"
 
+# ========== CHATGPT-STYLE WIDGET (FULL PAGE) ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -311,6 +312,20 @@ WIDGET_HTML = """<!doctype html>
 
   /* Utility */
   .hidden{display:none}
+
+  /* Optional: dark mode */
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0b0c0f; --panel:#111318; --text:#e7e8ea; --muted:#9aa0a6; --border:#24262b; --ring:#2a2d33;
+      --user:#0f172a; --assistant:#0f1115; --shadow: none;
+    }
+    .logo{background:#e7e8ea}
+    .send{background:#e7e8ea; color:#111; border-color:#e7e8ea}
+    .btn{background:#0f1115; color:#e7e8ea}
+    .content code{background:#1b1e25}
+    .content pre{background:#0f172a}
+    .copy{border-color:#2b3245; background:#0f172a}
+  }
 </style>
 </head>
 <body>
@@ -577,6 +592,34 @@ WIDGET_HTML = """<!doctype html>
 </body>
 </html>
 """
+
+@app.get("/widget", response_class=HTMLResponse)
+def widget():
+    return HTMLResponse(WIDGET_HTML)
+
+# ========== Health / Diag ==========
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.get("/diag")
+def diag():
+    info = {
+        "has_PINECONE_API_KEY": bool(os.getenv("PINECONE_API_KEY")),
+        "has_OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
+        "PINECONE_INDEX": index_name or None,
+        "PINECONE_HOST": host or None,
+        "NO_PROXY": os.getenv("NO_PROXY"),
+    }
+    try:
+        lst = pc.list_indexes()
+        info["pinecone_ok"] = True
+        info["index_count"] = len(lst or [])
+    except Exception as e:
+        info["pinecone_ok"] = False
+        info["error"] = str(e)
+    return info
+
 # ========== /search (RAW CONTEXT MODE) ==========
 @app.get("/search")
 def search_endpoint(
