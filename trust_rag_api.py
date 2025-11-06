@@ -24,7 +24,7 @@ os.environ.setdefault("NO_PROXY", "*")
 if os.getenv("OPENAI_BASE_URL", "").strip().lower() in ("", "none", "null"):
     os.environ.pop("OPENAI_BASE_URL", None)
 
-API_TOKEN         = os.getenv("API_TOKEN", "")      # optional bearer for /rag & /review
+API_TOKEN         = os.getenv("API_TOKEN", "")      # optional bearer for /search, /rag & /review
 SYNTH_MODEL       = os.getenv("SYNTH_MODEL", "gpt-4o-mini")
 MAX_SNIPPETS      = int(os.getenv("MAX_SNIPPETS", "20"))          # generous context count
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "24000"))  # large context
@@ -73,7 +73,7 @@ host       = os.getenv("PINECONE_HOST", "").strip()
 idx = pc.Index(host=host) if host else pc.Index(index_name)
 
 def _clean_openai_key(raw: str) -> str:
-    s = (raw or "").trim() if hasattr(raw, "trim") else (raw or "").strip()
+    s = (raw or "").strip()
     if not s.startswith("sk-"):
         parts = [t.strip() for t in s.replace("=", " ").split() if t.strip().startswith("sk-")]
         if parts:
@@ -151,18 +151,16 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
             continue
         if used + len(s) > MAX_CONTEXT_CHARS:
             break
-        buf.append(s)
-        used += len(s); kept += 1
+        buf.append(s); used += len(s); kept += 1
         if kept >= MAX_SNIPPETS:
             break
     context = "\n---\n".join(buf)
 
-    # hand over titles only (deduped, precedence applied)
+    # titles only (deduped, precedence applied)
     titles = _titles_only(uniq_sources)
     titles_html = "<ul>" + "".join(f"<li>{t}</li>" for t in titles) + "</ul>" if titles else "<p></p>"
 
-    # One and only user message: your question + raw context + a plain citations block.
-    # No style instructions, no memo framing, no extra rules.
+    # Only a user message (no system); no style instructions.
     user_msg = (
         f"<h2>Question</h2>\n<p>{question}</p>\n"
         f"<h3>Context</h3>\n<pre>{context}</pre>\n"
@@ -176,10 +174,10 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
             max_tokens=2200,
             messages=[{"role": "user", "content": user_msg}],
         )
-        html = (res.data[0].message.content if hasattr(res, "data") else res.choices[0].message.content).strip()
+        # openai>=1.40: choices[0] path preserved for back-compat
+        html = (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content.strip()
         if not html:
             return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
-        # If model replies in plain text, wrap for display
         if "<" not in html:
             html = "<div><p>" + html.replace("\n", "<br>") + "</p></div>"
         return html
@@ -194,13 +192,13 @@ WIDGET_HTML = """<!doctype html>
 <title>Private Trust Fiduciary Advisor</title>
 <style>
   html,body{margin:0;padding:0;background:#fff;color:#000;font:16px/1.6 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
-  .wrap{max-width:960px;margin:0 auto;padding:16px}
+  .wrap{max-width:980px;margin:0 auto;padding:16px}
   form{display:flex;gap:8px;align-items:flex-start;margin:12px 0}
   textarea{flex:1;min-height:140px;max-height:60vh;resize:vertical;border:1px solid #ddd;border-radius:6px;padding:10px;font:16px/1.5 inherit;color:#000;background:#fff}
   input[type=file]{border:1px solid #ddd;border-radius:6px;padding:8px;background:#fff;color:#000}
   button{border:1px solid #ddd;background:#fff;color:#000;padding:10px 16px;border-radius:6px;cursor:pointer}
   .out{margin-top:12px}
-  .card{border:1px solid #eee;border-radius:6px;padding:16px;background:#fff;color:#000;}
+  .card{border:1px solid #eee;border-radius:6px;padding:16px;background:#fff;color:#000}
 </style>
 </head>
 <body>
@@ -212,80 +210,45 @@ WIDGET_HTML = """<!doctype html>
     </form>
     <div id="out" class="out"><div class="card">Enter your question and click <strong>Ask</strong>.</div></div>
   </div>
-
 <script>
-// super minimal: only expand textarea, fetch, and render HTML (or rendered markdown)
-const q   = document.getElementById('q');
-const out = document.getElementById('out');
-const btn = document.getElementById('ask');
-const files = document.getElementById('file');
+const q=document.getElementById('q'), out=document.getElementById('out'), btn=document.getElementById('ask'), files=document.getElementById('file');
+function autoresize(){ q.style.height='auto'; q.style.height=Math.min(q.scrollHeight, window.innerHeight*0.6)+'px'; }
+q.addEventListener('input',autoresize); window.addEventListener('resize',autoresize);
 
-function autoresize() {
-  q.style.height = 'auto';
-  q.style.height = Math.min(q.scrollHeight, window.innerHeight*0.6) + 'px';
+async function askRag(text){
+  const url=new URL('/rag',location.origin); url.searchParams.set('question',text); url.searchParams.set('top_k','12');
+  const r=await fetch(url,{method:'GET'}); return r.json();
 }
-q.addEventListener('input', autoresize);
-window.addEventListener('resize', autoresize);
-
-async function askRag(text) {
-  const url = new URL('/rag', location.origin);
-  url.searchParams.set('question', text);
-  url.searchParams.set('top_k', '12');
-  const res = await fetch(url, { method:'GET' });
-  return res.json();
+async function askReview(text,fileList){
+  const fd=new FormData(); fd.append('question',text); for(const f of fileList) fd.append('files',f);
+  const r=await fetch('/review',{method:'POST',body:fd}); return r.json();
 }
-async function askReview(text, fileList) {
-  const fd = new FormData();
-  fd.append('question', text);
-  for (const f of fileList) fd.append('files', f);
-  const res = await fetch('/review', { method:'POST', body: fd });
-  return res.json();
-}
-
-// tiny markdown-to-HTML renderer (headings, bold/italic, code blocks, lists, hr)
+// minimal markdown->HTML (headings, hr, bold/italic, lists, code); passthrough HTML if present
 function mdToHtml(md){
   if(!md) return '';
-  let h = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  // code fences
-  h = h.replace(/```([\\s\\S]*?)```/g, (_,code)=>`<pre><code>${code.replace(/</g,'&lt;')}</code></pre>`);
-  // headings
-  h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>')
-       .replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>')
-       .replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>')
-       .replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>')
-       .replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>')
-       .replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
-  // horizontal rule
-  h = h.replace(/^---$/gm,'<hr>');
-  // bold/italic
-  h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>')
-       .replace(/\\*(.+?)\\*/g,'<em>$1</em>'); 
-  // simple lists
-  h = h.replace(/(?:^|\\n)[*-]\\s+(.*)/g, (m, item)=>`<li>${item}</li>`)
-  h = h.replace(/(<li>.*<\\/li>)(\\n?)+/gs, m => `<ul>${m}</ul>`);
-  // paragraphs
-  h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<pre|<hr)(.+)$/gm,'<p>$1</p>');
+  let h=md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  h=h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+  h=h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>')
+     .replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>')
+     .replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
+  h=h.replace(/^---$/gm,'<hr>');
+  h=h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>').replace(/\\*(.+?)\\*/g,'<em>$1</em>');
+  h=h.replace(/(?:^|\\n)[*-]\\s+(.*)/g,(m,i)=>`<li>${i}</li>`).replace(/(<li>.*<\\/li>)(\\n?)+/gs,m=>`<ul>${m}</ul>`);
+  h=h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<pre|<hr)(.+)$/gm,'<p>$1</p>');
   return h;
 }
-
-btn.addEventListener('click', async () => {
-  const text = q.value.trim();
-  if (!text) return;
-  out.innerHTML = '<div class="card">Working…</div>';
-  try {
+btn.addEventListener('click', async ()=>{
+  const text=q.value.trim(); if(!text) return;
+  out.innerHTML='<div class="card">Working…</div>';
+  try{
     let data;
-    if (files.files && files.files.length > 0) {
-      data = await askReview(text, files.files);
-    } else {
-      data = await askRag(text);
-    }
+    if(files.files && files.files.length>0){ data=await askReview(text,files.files); }
+    else { data=await askRag(text); }
     let html = data && data.answer ? data.answer : '';
-    // If API returned plain HTML from GPT, use it; if it seems markdown, render to HTML.
-    const looksHtml = typeof html === 'string' && /<\\w+[^>]*>/.test(html);
-    const rendered = looksHtml ? html : mdToHtml(String(html || ''));
-    out.innerHTML = '<div class="card">' + rendered + '</div>';
-  } catch (e) {
-    out.innerHTML = '<div class="card">Error: ' + (e && e.message ? e.message : String(e)) + '</div>';
+    const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
+    out.innerHTML = '<div class="card">' + (looksHtml ? html : mdToHtml(String(html||''))) + '</div>';
+  }catch(e){
+    out.innerHTML='<div class="card">Error: '+(e && e.message? e.message:String(e))+'</div>';
   }
 });
 </script>
@@ -320,7 +283,49 @@ def diag():
         info["error"] = str(e)
     return info
 
-# ========== RAG ==========
+# ========== /search (RAW CONTEXT MODE) ==========
+@app.get("/search")
+def search_endpoint(
+    question: str = Query(..., min_length=3),
+    top_k: int = Query(12, ge=1, le=30),
+    level: str | None = Query(None),
+    authorization: str | None = Header(default=None),
+):
+    """
+    Raw/context mode:
+    - Returns only retrieved context for your GPT to synthesize.
+    - Response: { question, titles[], matches[], t_ms }
+      matches[] items: { title, level, page, version, score, snippet }
+    """
+    require_auth(authorization)
+    check_rate_limit()
+    t0 = time.time()
+    try:
+        emb = client.embeddings.create(model="text-embedding-3-small", input=question).data[0].embedding
+        flt = {"doc_level": {"$eq": level}} if level else None
+        res = idx.query(vector=emb, top_k=max(top_k, 12), include_metadata=True, filter=flt)
+        matches = res["matches"] if isinstance(res, dict) else getattr(res, "matches", [])
+        uniq = _dedup_and_rank_sources(matches, top_k=top_k)
+
+        # build raw payload
+        titles = _titles_only(uniq)
+        rows = []
+        for s in uniq:
+            meta = s["meta"] or {}
+            rows.append({
+                "title":   s["title"],
+                "level":   s["level"],
+                "page":    s["page"],
+                "version": s.get("version",""),
+                "score":   s["score"],
+                "snippet": _extract_snippet(meta) or ""
+            })
+        return {"question": question, "titles": titles, "matches": rows, "t_ms": int((time.time()-t0)*1000)}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ========== /rag (SYNTHESIZED HTML ANSWER) ==========
 @app.get("/rag")
 def rag_endpoint(
     question: str = Query(..., min_length=3),
@@ -344,7 +349,7 @@ def rag_endpoint(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-# ========== Review (PDF/TXT/DOCX) ==========
+# ========== /review (PDF/TXT/DOCX) ==========
 @app.post("/review")
 def review_endpoint(
     authorization: str | None = Header(default=None),
@@ -369,18 +374,14 @@ def review_endpoint(
                     reader = pypdf.PdfReader(io.BytesIO(raw))
                     pages = []
                     for p in reader.pages:
-                        try:
-                            pages.append(p.extract_text() or "")
-                        except Exception:
-                            pages.append("")
+                        try: pages.append(p.extract_text() or "")
+                        except Exception: pages.append("")
                     texts.append("\n".join(pages))
                 except Exception as e:
                     raise HTTPException(status_code=415, detail=f"Failed to parse PDF: {f.filename} ({e})")
             elif name.endswith(".txt"):
-                try:
-                    texts.append(raw.decode("utf-8", errors="ignore"))
-                except Exception:
-                    texts.append(raw.decode("latin-1", errors="ignore"))
+                try: texts.append(raw.decode("utf-8", errors="ignore"))
+                except Exception: texts.append(raw.decode("latin-1", errors="ignore"))
             elif name.endswith(".docx"):
                 try:
                     try:
@@ -398,10 +399,10 @@ def review_endpoint(
                     raise HTTPException(status_code=415, detail=f"Failed to parse DOCX: {f.filename} ({e})")
             else:
                 raise HTTPException(status_code=415, detail=f"Unsupported file type: {f.filename} (only PDF/TXT/DOCX)")
-        merged  = "\n---\n".join([t for t in texts if t.strip()])
-        chunks  = [merged[i:i+2000] for i in range(0, len(merged), 2000)][:MAX_SNIPPETS]
-        pseudo  = [{"title": "Uploaded Document", "level": "L5", "page": "?", "version": "", "score": 1.0, "meta": {}}]
-        html    = synthesize_html(question or "Please analyze the attached materials.", pseudo, chunks)
+        merged = "\n---\n".join([t for t in texts if t.strip()])
+        chunks = [merged[i:i+2000] for i in range(0, len(merged), 2000)][:MAX_SNIPPETS]
+        pseudo = [{"title": "Uploaded Document", "level": "L5", "page": "?", "version": "", "score": 1.0, "meta": {}}]
+        html = synthesize_html(question or "Please analyze the attached materials.", pseudo, chunks)
         return {"answer": html, "t_ms": int((time.time() - t0) * 1000)}
     except Exception as e:
         traceback.print_exc()
