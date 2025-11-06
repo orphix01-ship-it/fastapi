@@ -180,7 +180,7 @@ WIDGET_HTML = """<!doctype html>
 <style>
   :root{
     --bg:#ffffff; --text:#000000; --border:#e5e5e5; --ring:#d9d9d9;
-    --user:#e8f1ff; /* light blue for user's question */
+    --user:#e8f1ff;
     --shadow:0 1px 2px rgba(0,0,0,.03), 0 8px 24px rgba(0,0,0,.04);
     --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial;
     --title:"Cinzel",serif;
@@ -205,23 +205,16 @@ WIDGET_HTML = """<!doctype html>
   .msg.advisor .bubble{background:transparent; padding:0; max-width:100%}
   .meta{font-size:12px;margin-bottom:6px;color:#000}
 
+  /* Rich content defaults */
   .bubble h1,.bubble h2,.bubble h3{margin:.6em 0 .4em}
   .bubble p{margin:.6em 0}
-  .bubble ul{margin:.4em 0 .6em 1.2em}
+  .bubble ul, .bubble ol{margin:.4em 0 .6em 1.4em}
+  .bubble blockquote{margin:.6em 0; padding:.4em .8em; border-left:3px solid #ddd; background:#f9f9f9}
   .bubble code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono","Roboto Mono","Oxygen Mono","Ubuntu Mono","Courier New",monospace;background:#fff;border:1px solid var(--border);padding:.1em .3em;border-radius:6px;color:#000}
   .bubble pre{background:#fff;color:#000;border:1px solid var(--border);padding:12px;border-radius:12px;overflow:auto}
-
-  .composer{position:fixed;bottom:0;left:0;right:0;background:#fff;padding:18px 12px;border-top:1px solid var(--border)}
-  .composer .inner{max-width:900px;margin:0 auto}
-  .bar{display:flex;align-items:flex-end;gap:8px;background:#fff;border:1px solid var(--ring);border-radius:22px;padding:8px;box-shadow:var(--shadow)}
-  .input{flex:1;min-height:24px;max-height:160px;overflow:auto;outline:none;padding:8px 10px;font:16px/1.5 var(--font);color:#000}
-  .input:empty:before{content:attr(data-placeholder);color:#000}
-  .send{padding:8px 14px;border-radius:12px;background:#000;color:#fff;border:1px solid #000;cursor:pointer}
-
-  a{color:#000;text-decoration:underline}
-  a:hover{text-decoration:none}
-
-  #file{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(1px,1px,1px,1px)}
+  .bubble a{color:#065fd4;text-decoration:underline}
+  .bubble strong{font-weight:700}
+  .bubble em{font-style:italic}
 </style>
 </head>
 <body>
@@ -238,10 +231,10 @@ WIDGET_HTML = """<!doctype html>
 
   <div class="composer">
     <div class="inner">
-      <div class="bar">
+      <div class="bar" style="display:flex;align-items:flex-end;gap:8px;background:#fff;border:1px solid var(--ring);border-radius:22px;padding:8px;box-shadow:var(--shadow)">
         <input id="file" type="file" multiple accept=".pdf,.txt,.docx" />
-        <div id="input" class="input" role="textbox" aria-multiline="true" contenteditable="true" data-placeholder="Message the Advisor… (Shift+Enter for newline)"></div>
-        <button id="send" class="send" title="Send">Send</button>
+        <div id="input" class="input" role="textbox" aria-multiline="true" contenteditable="true" data-placeholder="Message the Advisor… (Shift+Enter for newline)" style="flex:1;min-height:24px;max-height:160px;overflow:auto;outline:none;padding:8px 10px;font:16px/1.5 var(--font);color:#000"></div>
+        <button id="send" class="send" title="Send" style="padding:8px 14px;border-radius:12px;background:#000;color:#fff;border:1px solid #000;cursor:pointer">Send</button>
       </div>
       <div style="margin-top:8px;color:#000;font-size:12px;">
         State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.
@@ -269,23 +262,76 @@ WIDGET_HTML = """<!doctype html>
     elThread.scrollTop = elThread.scrollHeight;
   }
 
-  // Minimal MD -> HTML (ensures bold/italic render as <strong>/<em>)
+  // Sanitize URLs to avoid javascript: schemes
+  function safeUrl(url){
+    try{
+      const u = new URL(url, window.location.origin);
+      const ok = ['http:','https:','mailto:','tel:'].includes(u.protocol);
+      return ok ? u.href : '#';
+    }catch(_){ return '#'; }
+  }
+
+  // Robust MD -> HTML so output never shows raw asterisks and renders bold/italic/links, etc.
   function mdToHtml(md){
     if(!md) return '';
-    if (/<\\w+[^>]*>/.test(md)) return md;
+    // If it already looks like HTML, trust it (so <strong>, <em>, <a>, etc. render).
+    if (/<\w+[^>]*>/.test(md)) return md;
+
+    // Escape
     let h = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    h = h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
-    h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>')
-         .replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>')
-         .replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
-    h = h.replace(/^---$/gm,'<hr>');
-    h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>')
-         .replace(/__(.+?)__/g,'<strong>$1</strong>')
-         .replace(/\\*(.+?)\\*/g,'<em>$1</em>')
-         .replace(/_(.+?)_/g,'<em>$1</em>');
-    h = h.replace(/(?:^|\\n)[*-]\\s+(.*)/g,(m,i)=>`<li>${i}</li>`)
-         .replace(/(<li>.*<\\/li>)(\\n?)+/gs,m=>`<ul>${m}</ul>`);
-    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<pre|<hr|<p|<blockquote)(.+)$/gm,'<p>$1</p>');
+
+    // Code blocks (triple backticks)
+    h = h.replace(/```(\w+)?\n([\s\S]*?)```/g, (_,lang,code)=> {
+      const c = (code||'').replace(/</g,'&lt;');
+      return `<pre><code>${c}</code></pre>`;
+    });
+
+    // Blockquotes
+    h = h.replace(/^(>\s?.+)(\n(>\s?.+))*/gm, (m)=> {
+      const inner = m.replace(/^>\s?/gm,'');
+      return `<blockquote>${inner}</blockquote>`;
+    });
+
+    // Ordered lists
+    h = h.replace(/^(?:\s*\d+\.\s.+)(?:\n\s*\d+\.\s.+)*/gm, (block)=>{
+      const items = block.split(/\n/).map(l=>l.replace(/^\s*\d+\.\s/, '')).map(t=>`<li>${t}</li>`).join('');
+      return `<ol>${items}</ol>`;
+    });
+
+    // Unordered lists
+    h = h.replace(/^(?:\s*[*-]\s.+)(?:\n\s*[*-]\s.+)*/gm, (block)=>{
+      const items = block.split(/\n/).map(l=>l.replace(/^\s*[*-]\s/, '')).map(t=>`<li>${t}</li>`).join('');
+      return `<ul>${items}</ul>`;
+    });
+
+    // Inline code
+    h = h.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+    // Bold-Italic (***text*** or ___text___)
+    h = h.replace(/(\*\*\*|___)(.+?)\1/g, '<strong><em>$2</em></strong>');
+
+    // Bold (**text** or __text__)
+    h = h.replace(/(\*\*|__)(.+?)\1/g, '<strong>$2</strong>');
+
+    // Italic (*text* or _text_)
+    h = h.replace(/(^|[^\*])\*(?!\s)(.+?)\*(?!\w)/g, '$1<em>$2</em>');
+    h = h.replace(/(^|[^_])_(?!\s)(.+?)_(?!\w)/g, '$1<em>$2</em>');
+
+    // Links: [text](url)
+    h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_,text,url)=>{
+      return `<a href="${safeUrl(url)}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+    });
+
+    // Paragraphs (avoid wrapping existing block tags)
+    h = h.replace(/(^|\n)(?!<h\d|<ul>|<ol>|<pre>|<blockquote>|<hr>|<p>|<\/)([^\n]+)(?=\n|$)/g, (m, lead, line)=>{
+      const trimmed = line.trim();
+      if (!trimmed) return '';
+      return `${lead}<p>${trimmed}</p>`;
+    });
+
+    // Horizontal rule
+    h = h.replace(/^\s*---\s*$/gm, '<hr>');
+
     return h;
   }
 
@@ -318,6 +364,7 @@ WIDGET_HTML = """<!doctype html>
 
   async function handleSend(q){
     if(!q) return;
+    // USER bubble (light blue)
     addMessage('user', q.replace(/\\n/g,'<br>'));
     lastQuestion = q;
 
