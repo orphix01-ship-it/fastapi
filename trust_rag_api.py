@@ -184,105 +184,399 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
     except Exception as e:
         return f"<p><em>(Synthesis unavailable: {e})</em></p>"
 
-# ========== SUPER-MINIMAL WHITE WIDGET ==========
 WIDGET_HTML = """<!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Private Trust Fiduciary Advisor</title>
 <style>
-  html,body{margin:0;padding:0;background:#fff;color:#000;font:16px/1.6 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
-  .wrap{max-width:980px;margin:0 auto;padding:16px}
-  form{display:flex;gap:8px;align-items:flex-start;margin:12px 0}
-  textarea{flex:1;min-height:140px;max-height:60vh;resize:vertical;border:1px solid #ddd;border-radius:6px;padding:10px;font:16px/1.5 inherit;color:#000;background:#fff}
-  input[type=file]{border:1px solid #ddd;border-radius:6px;padding:8px;background:#fff;color:#000}
-  button{border:1px solid #ddd;background:#fff;color:#000;padding:10px 16px;border-radius:6px;cursor:pointer}
-  .out{margin-top:12px}
-  .card{border:1px solid #eee;border-radius:6px;padding:16px;background:#fff;color:#000}
+  /* ====== ChatGPT-like font stack ======
+     If you have a Söhne webfont license, uncomment and point src: to your files.
+  @font-face{
+    font-family: "Söhne";
+    src: url("/fonts/soehne-var.woff2") format("woff2");
+    font-weight: 100 900; font-style: normal; font-display: swap;
+  }
+  @font-face{
+    font-family: "Söhne";
+    src: url("/fonts/soehne-italic-var.woff2") format("woff2");
+    font-weight: 100 900; font-style: italic; font-display: swap;
+  }
+  */
+  :root{
+    --bg:#f7f7f8;
+    --panel:#ffffff;
+    --text:#0c0c0d;
+    --muted:#6b7280;
+    --border:#e5e7eb;
+    --ring:#d1d5db;
+    --user:#e5f0ff;
+    --assistant:#ffffff;
+    --radius:16px;
+    --radius-sm:12px;
+    --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.06);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, "Cascadia Mono", "Segoe UI Mono", "Roboto Mono", "Oxygen Mono", "Ubuntu Mono", "Courier New", monospace;
+    --font: "Söhne", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font: 16px/1.6 var(--font);
+  }
+
+  .app{
+    display:flex; flex-direction:column; height:100vh; width:100%;
+  }
+  .header{
+    position:sticky; top:0; backdrop-filter:saturate(180%) blur(8px);
+    background:rgba(247,247,248,.7); border-bottom:1px solid var(--border);
+    z-index:10;
+  }
+  .header .inner{
+    max-width: 900px; margin:0 auto; padding:12px 16px;
+    display:flex; align-items:center; gap:8px;
+  }
+  .logo{width:28px;height:28px;border-radius:8px;background:#111;}
+  .title{font-weight:600}
+
+  .main{
+    flex:1; overflow:auto; padding: 24px 12px 140px; /* space for composer */
+  }
+  .container{max-width:900px;margin:0 auto}
+
+  /* Conversation */
+  .thread{display:flex; flex-direction:column; gap:16px}
+  .msg{
+    display:grid; grid-template-columns: 40px 1fr; gap:12px;
+    padding:16px; border:1px solid var(--border); border-radius: var(--radius-sm);
+    background:var(--assistant); box-shadow: var(--shadow);
+  }
+  .msg.user{ background:var(--user) }
+  .avatar{
+    width:40px; height:40px; border-radius:8px; background:#111; color:#fff;
+    display:flex; align-items:center; justify-content:center; font-weight:700;
+  }
+  .avatar.user{ background:#1d4ed8 }
+  .content{min-width:0}
+  .meta{
+    display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); margin-bottom:8px;
+  }
+  .actions{ display:flex; gap:8px; margin-top:10px; }
+  .btn{
+    border:1px solid var(--border); background:#fff; color:#111;
+    padding:6px 10px; border-radius:10px; font-size:12px; cursor:pointer;
+  }
+  .btn:active{ transform: translateY(1px) }
+
+  /* Markdown-ish rendering */
+  .content h1,.content h2,.content h3{margin:.6em 0 .4em}
+  .content p{margin:.6em 0}
+  .content ul{margin:.4em 0 .6em 1.2em}
+  .content code{font-family:var(--mono); background:#f3f4f6; padding:.1em .3em; border-radius:6px}
+  .content pre{background:#0b1020; color:#e6edf3; padding:12px; border-radius:12px; overflow:auto}
+  .codebar{display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; font-size:12px; color:#c7cbd1}
+  .copy{border:1px solid #2b3245; background:#111827; color:#e6edf3; padding:4px 8px; border-radius:8px; cursor:pointer}
+
+  /* Sticky composer (ChatGPT-like) */
+  .composer{
+    position:fixed; bottom:0; left:0; right:0; background:linear-gradient(to top, rgba(247,247,248,1), rgba(247,247,248,.8) 60%, rgba(247,247,248,0));
+    padding:18px 12px; border-top:1px solid var(--border);
+  }
+  .composer .inner{max-width:900px; margin:0 auto}
+  .bar{
+    display:flex; align-items:flex-end; gap:8px; background:var(--panel);
+    border:1px solid var(--ring); border-radius: 22px; padding:8px; box-shadow: var(--shadow);
+  }
+  .input{
+    flex:1; min-height:24px; max-height:160px; overflow:auto; outline:none;
+    padding:8px 10px; border-radius:16px; font: 16px/1.5 var(--font);
+  }
+  .input:empty:before{content:attr(data-placeholder); color:#9ca3af}
+  .iconbtn{
+    width:36px; height:36px; border-radius:12px; border:1px solid var(--border);
+    background:#fff; display:flex; align-items:center; justify-content:center; cursor:pointer;
+  }
+  .send{
+    padding:8px 14px; border-radius:12px; background:#111; color:#fff; border:1px solid #111; cursor:pointer;
+  }
+
+  /* Subtle link style (like ChatGPT) */
+  a{color:#065fd4; text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  /* Hidden native file input */
+  #file{position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(1px,1px,1px,1px)}
+  .filelabel{cursor:pointer}
+
+  /* Utility */
+  .hidden{display:none}
 </style>
 </head>
 <body>
-  <div class="wrap">
-    <form id="f" onsubmit="return false;">
-      <textarea id="q" placeholder="Type your question or paste text. The box expands as you type." required></textarea>
-      <input id="file" type="file" multiple accept=".pdf,.txt,.docx"/>
-      <button id="ask">Ask</button>
-    </form>
-    <div id="out" class="out"><div class="card">Enter your question and click <strong>Ask</strong>.</div></div>
+<div class="app">
+  <div class="header">
+    <div class="inner">
+      <div class="logo" aria-hidden="true"></div>
+      <div class="title">Private Trust Fiduciary Advisor</div>
+    </div>
   </div>
-<script>
-const q=document.getElementById('q'), out=document.getElementById('out'), btn=document.getElementById('ask'), files=document.getElementById('file');
-function autoresize(){ q.style.height='auto'; q.style.height=Math.min(q.scrollHeight, window.innerHeight*0.6)+'px'; }
-q.addEventListener('input',autoresize); window.addEventListener('resize',autoresize);
 
-async function askRag(text){
-  const url=new URL('/rag',location.origin); url.searchParams.set('question',text); url.searchParams.set('top_k','12');
-  const r=await fetch(url,{method:'GET'}); return r.json();
-}
-async function askReview(text,fileList){
-  const fd=new FormData(); fd.append('question',text); for(const f of fileList) fd.append('files',f);
-  const r=await fetch('/review',{method:'POST',body:fd}); return r.json();
-}
-// minimal markdown->HTML (headings, hr, bold/italic, lists, code); passthrough HTML if present
-function mdToHtml(md){
-  if(!md) return '';
-  let h=md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  h=h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
-  h=h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>')
-     .replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>')
-     .replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
-  h=h.replace(/^---$/gm,'<hr>');
-  h=h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>').replace(/\\*(.+?)\\*/g,'<em>$1</em>');
-  h=h.replace(/(?:^|\\n)[*-]\\s+(.*)/g,(m,i)=>`<li>${i}</li>`).replace(/(<li>.*<\\/li>)(\\n?)+/gs,m=>`<ul>${m}</ul>`);
-  h=h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<pre|<hr)(.+)$/gm,'<p>$1</p>');
-  return h;
-}
-btn.addEventListener('click', async ()=>{
-  const text=q.value.trim(); if(!text) return;
-  out.innerHTML='<div class="card">Working…</div>';
-  try{
-    let data;
-    if(files.files && files.files.length>0){ data=await askReview(text,files.files); }
-    else { data=await askRag(text); }
-    let html = data && data.answer ? data.answer : '';
-    const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
-    out.innerHTML = '<div class="card">' + (looksHtml ? html : mdToHtml(String(html||''))) + '</div>';
-  }catch(e){
-    out.innerHTML='<div class="card">Error: '+(e && e.message? e.message:String(e))+'</div>';
+  <main class="main">
+    <div class="container">
+      <div id="thread" class="thread">
+        <div class="msg assistant">
+          <div class="avatar">A</div>
+          <div class="content">
+            <div class="meta">Assistant · Ready</div>
+            <p>Ask anything about trusts. Attach a PDF/DOCX/TXT if you want me to review it.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Composer -->
+  <div class="composer">
+    <div class="inner">
+      <div class="bar">
+        <label class="iconbtn filelabel" title="Attach file">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M8 12v5a4 4 0 1 0 8 0V7a3 3 0 0 0-6 0v8a2 2 0 1 0 4 0V9" stroke="#111" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <input id="file" type="file" multiple accept=".pdf,.txt,.docx"/>
+        </label>
+        <div id="input" class="input" role="textbox" aria-multiline="true" contenteditable="true" data-placeholder="Message ChatGPT… (Shift+Enter for newline)"></div>
+        <button id="send" class="send" title="Send">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="m5 12 14-7-4 14-3-5-7-2z" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+      <div style="margin-top:8px; color:#6b7280; font-size:12px;">We don’t store files. Generation may use your private vector index only.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const elThread = document.getElementById('thread');
+  const elInput  = document.getElementById('input');
+  const elSend   = document.getElementById('send');
+  const elFile   = document.getElementById('file');
+
+  let lastQuestion = "";
+
+  function now() {
+    return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
   }
-});
+
+  function addMessage(role, html, rawMd=null) {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg ' + (role === 'user' ? 'user' : 'assistant');
+    wrap.innerHTML = `
+      <div class="avatar ${role==='user'?'user':''}">${role==='user'?'U':'A'}</div>
+      <div class="content">
+        <div class="meta">${role==='user'?'You':'Assistant'} · ${now()}</div>
+        <div class="body">${html}</div>
+        ${role==='assistant' ? `
+          <div class="actions">
+            <button class="btn" data-action="copy-answer">Copy</button>
+            <button class="btn" data-action="regenerate">Regenerate</button>
+            ${rawMd ? `<button class="btn" data-action="show-sources">Citations</button>` : ``}
+          </div>
+        ` : ``}
+      </div>`;
+    elThread.appendChild(wrap);
+    elThread.scrollTop = elThread.scrollHeight;
+
+    // Wire up action buttons
+    wrap.querySelectorAll('.btn').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const act = btn.dataset.action;
+        if (act === 'copy-answer') {
+          const text = wrap.querySelector('.body').innerText;
+          navigator.clipboard.writeText(text);
+          btn.textContent = 'Copied';
+          setTimeout(()=>btn.textContent='Copy', 1200);
+        } else if (act === 'regenerate') {
+          if (lastQuestion) send(lastQuestion, true);
+        } else if (act === 'show-sources') {
+          // Toggle citations list if present
+          const c = wrap.querySelector('.citations');
+          if (c) c.classList.toggle('hidden');
+        }
+      });
+    });
+
+    // Enhance code blocks with copy bars
+    wrap.querySelectorAll('pre').forEach(pre=>{
+      if (pre.dataset.wired) return;
+      pre.dataset.wired = "1";
+      const bar = document.createElement('div');
+      bar.className = 'codebar';
+      bar.innerHTML = `<span>Code</span><button class="copy">Copy code</button>`;
+      pre.parentNode.insertBefore(bar, pre);
+      bar.querySelector('.copy').addEventListener('click', ()=>{
+        const text = pre.innerText;
+        navigator.clipboard.writeText(text);
+        bar.querySelector('.copy').textContent = 'Copied';
+        setTimeout(()=>bar.querySelector('.copy').textContent='Copy code', 1200);
+      });
+    });
+  }
+
+  // Lightweight MD→HTML (keeps your passthrough HTML)
+  function mdToHtml(md){
+    if(!md) return '';
+    // If it already looks like HTML, just trust it.
+    if (/<\\w+[^>]*>/.test(md)) return md;
+    let h = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    h = h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+    h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>')
+         .replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>')
+         .replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
+    h = h.replace(/^---$/gm,'<hr>');
+    h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>').replace(/\\*(.+?)\\*/g,'<em>$1</em>');
+    h = h.replace(/(?:^|\\n)[*-]\\s+(.*)/g,(m,i)=>`<li>${i}</li>`).replace(/(<li>.*<\\/li>)(\\n?)+/gs,m=>`<ul>${m}</ul>`);
+    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<pre|<hr)(.+)$/gm,'<p>$1</p>');
+    return h;
+  }
+
+  async function callRag(q){
+    const url=new URL('/rag', location.origin);
+    url.searchParams.set('question', q);
+    url.searchParams.set('top_k','12');
+    const r = await fetch(url,{method:'GET'});
+    if(!r.ok) throw new Error('RAG failed: '+r.status);
+    return r.json();
+  }
+  async function callReview(q, files){
+    const fd = new FormData();
+    fd.append('question', q);
+    for(const f of files) fd.append('files', f);
+    const r = await fetch('/review',{method:'POST', body:fd});
+    if(!r.ok) throw new Error('Review failed: '+r.status);
+    return r.json();
+  }
+
+  function readInput(){
+    // Normalize <div><br></div> to newlines
+    const tmp = elInput.cloneNode(true);
+    tmp.querySelectorAll('div').forEach(d=>{
+      if (d.innerHTML === "<br>") d.innerHTML = "\\n";
+    });
+    const text = tmp.innerText.replace(/\\u00A0/g,' ').trim();
+    return text;
+  }
+
+  async function send(q, isRegen=false){
+    if(!q) return;
+    if(!isRegen){
+      lastQuestion = q;
+      // Show user bubble
+      addMessage('user', q.replace(/\\n/g,'<br>'));
+    }
+    // Show working assistant bubble
+    const work = document.createElement('div');
+    work.className = 'msg assistant';
+    work.innerHTML = '<div class="avatar">A</div><div class="content"><div class="meta">Assistant · thinking…</div><div class="body"><p>Working…</p></div></div>';
+    elThread.appendChild(work); elThread.scrollTop = elThread.scrollHeight;
+
+    try{
+      const files = Array.from(elFile.files || []);
+      const data = files.length ? await callReview(q, files) : await callRag(q);
+      let html = (data && data.answer) ? data.answer : '';
+      const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
+      const rendered = looksHtml ? html : mdToHtml(String(html||''));
+
+      // Replace the working bubble with final answer (plus hidden citations list if present in html)
+      work.querySelector('.meta').textContent = 'Assistant · ' + now();
+      work.querySelector('.body').innerHTML = rendered;
+
+      // If your synthesis includes a <ul> of citations, optionally mark it for toggle
+      const cites = work.querySelector('h3, h4, h5, h6');
+      if (cites && /citation/i.test(cites.textContent)) {
+        const list = cites.nextElementSibling;
+        if (list && (list.tagName === 'UL' || list.tagName === 'OL')) {
+          list.classList.add('citations','hidden');
+        }
+        // Add action row if missing
+        let actions = work.querySelector('.actions');
+        if (!actions) {
+          actions = document.createElement('div');
+          actions.className = 'actions';
+          work.querySelector('.content').appendChild(actions);
+        }
+        const btn = document.createElement('button');
+        btn.className = 'btn'; btn.dataset.action='show-sources'; btn.textContent='Citations';
+        actions.appendChild(btn);
+        btn.addEventListener('click', ()=>{
+          const c = work.querySelector('.citations');
+          if (c) c.classList.toggle('hidden');
+        });
+      }
+
+      // Wire copy/regenerate for this bubble
+      let actions = work.querySelector('.actions');
+      if (!actions) {
+        actions = document.createElement('div');
+        actions.className = 'actions';
+        work.querySelector('.content').appendChild(actions);
+      }
+      const copyBtn = document.createElement('button'); copyBtn.className='btn'; copyBtn.dataset.action='copy-answer'; copyBtn.textContent='Copy';
+      const regenBtn = document.createElement('button'); regenBtn.className='btn'; regenBtn.dataset.action='regenerate'; regenBtn.textContent='Regenerate';
+      actions.appendChild(copyBtn); actions.appendChild(regenBtn);
+      [copyBtn, regenBtn].forEach(b=>b.addEventListener('click', ()=>{
+        const act = b.dataset.action;
+        if (act==='copy-answer'){
+          const txt = work.querySelector('.body').innerText;
+          navigator.clipboard.writeText(txt); b.textContent='Copied'; setTimeout(()=>b.textContent='Copy',1200);
+        } else if (act==='regenerate'){
+          if (lastQuestion) send(lastQuestion, true);
+        }
+      }));
+
+      // Add code copy bars
+      work.querySelectorAll('pre').forEach(pre=>{
+        if (pre.dataset.wired) return;
+        pre.dataset.wired = "1";
+        const bar = document.createElement('div');
+        bar.className = 'codebar';
+        bar.innerHTML = `<span>Code</span><button class="copy">Copy code</button>`;
+        pre.parentNode.insertBefore(bar, pre);
+        bar.querySelector('.copy').addEventListener('click', ()=>{
+          navigator.clipboard.writeText(pre.innerText);
+          bar.querySelector('.copy').textContent='Copied';
+          setTimeout(()=>bar.querySelector('.copy').textContent='Copy code',1200);
+        });
+      });
+
+    }catch(e){
+      work.querySelector('.meta').textContent = 'Assistant · error';
+      work.querySelector('.body').innerHTML = '<p style="color:#b91c1c">Error: '+(e && e.message ? e.message : String(e))+'</p>';
+    }
+  }
+
+  // Send on Enter, newline on Shift+Enter — like ChatGPT
+  elInput.addEventListener('keydown', (ev)=>{
+    if (ev.key === 'Enter' && !ev.shiftKey){
+      ev.preventDefault();
+      const q = readInput();
+      if (!q) return;
+      elInput.innerHTML = '';
+      send(q);
+    }
+  });
+  elSend.addEventListener('click', ()=>{
+    const q = readInput();
+    if (!q) return;
+    elInput.innerHTML = '';
+    send(q);
+  });
 </script>
 </body>
 </html>
 """
-
-@app.get("/widget", response_class=HTMLResponse)
-def widget():
-    return HTMLResponse(WIDGET_HTML)
-
-# ========== Health / Diag ==========
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-@app.get("/diag")
-def diag():
-    info = {
-        "has_PINECONE_API_KEY": bool(os.getenv("PINECONE_API_KEY")),
-        "has_OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
-        "PINECONE_INDEX": index_name or None,
-        "PINECONE_HOST": host or None,
-        "NO_PROXY": os.getenv("NO_PROXY"),
-    }
-    try:
-        lst = pc.list_indexes()
-        info["pinecone_ok"] = True
-        info["index_count"] = len(lst or [])
-    except Exception as e:
-        info["pinecone_ok"] = False
-        info["error"] = str(e)
-    return info
-
 # ========== /search (RAW CONTEXT MODE) ==========
 @app.get("/search")
 def search_endpoint(
