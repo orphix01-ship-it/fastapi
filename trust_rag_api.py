@@ -32,7 +32,7 @@ UPLOAD_MAX_BYTES  = 12 * 1024 * 1024                               # 12 MB per f
 
 app = FastAPI(title="Private Trust Fiduciary Advisor API")
 
-# ✅ FIX: pass the class + kwargs (do not instantiate CORSMiddleware yourself)
+# ✅ Proper CORSMiddleware usage (pass the class, not an instance)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -130,7 +130,7 @@ def _titles_only(uniq_sources: list[dict]) -> list[str]:
     seen, out = set(), []
     for s in uniq_sources:
         t = s["title"]
-        if t in seen: 
+        if t in seen:
             continue
         seen.add(t)
         out.append(t)
@@ -302,7 +302,8 @@ WIDGET_HTML = """<!doctype html>
           <div class="avatar">A</div>
           <div class="content">
             <div class="meta">Advisor · Ready</div>
-            <p>Ask anything about trusts. Attach a PDF/DOCX/TXT if you want me to review it.</p>
+            <!-- ✅ Replaced with advanced professional greeting mentioning trust, fiduciary, contracts -->
+            <p>State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.</p>
           </div>
         </div>
       </div>
@@ -392,6 +393,7 @@ WIDGET_HTML = """<!doctype html>
     });
   }
 
+  // Minimal MD->HTML (keeps passthrough HTML)
   function mdToHtml(md){
     if(!md) return '';
     if (/<\\w+[^>]*>/.test(md)) return md;
