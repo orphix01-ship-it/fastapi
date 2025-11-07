@@ -7,7 +7,7 @@ from openai import OpenAI
 import httpx, zipfile, io, re, os, time, traceback, sqlite3, json, uuid
 from datetime import datetime
 from collections import deque
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 # ========== ENV / SETUP ==========
 try:
@@ -26,11 +26,11 @@ os.environ.setdefault("NO_PROXY", "*")
 if os.getenv("OPENAI_BASE_URL", "").strip().lower() in ("", "none", "null"):
     os.environ.pop("OPENAI_BASE_URL", None)
 
-API_TOKEN         = os.getenv("API_TOKEN", "")      # optional bearer for /search, /rag & /review
+API_TOKEN         = os.getenv("API_TOKEN", "")      # optional bearer for /search, /rag & /review (leave empty to disable auth)
 SYNTH_MODEL       = os.getenv("SYNTH_MODEL", "gpt-4o")
 MAX_SNIPPETS      = int(os.getenv("MAX_SNIPPETS", "20"))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "24000"))
-MAX_OUT_TOKENS    = int(os.getenv("MAX_OUT_TOKENS", "16384"))  # high, sane default
+MAX_OUT_TOKENS    = int(os.getenv("MAX_OUT_TOKENS", "16384"))
 UPLOAD_MAX_BYTES  = 12 * 1024 * 1024  # 12 MB
 
 app = FastAPI(title="Private Trust Fiduciary Advisor API")
@@ -49,7 +49,7 @@ except Exception:
     pass
 
 # ========== AUTH / RATE LIMIT ==========
-def require_auth(auth_header: str | None):
+def require_auth(auth_header: Optional[str]):
     if not API_TOKEN:
         return
     if not auth_header or not auth_header.startswith("Bearer "):
@@ -134,7 +134,7 @@ def init_db():
     conn.close()
 init_db()
 
-def iso_now():
+def iso_now() -> str:
     return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 # ========== CLIENTS ==========
@@ -157,7 +157,7 @@ openai_http = httpx.Client(timeout=120.0, trust_env=False)
 client      = OpenAI(api_key=_openai_key, http_client=openai_http)
 
 # ========== RAG HELPERS ==========
-def _extract_snippet(meta: dict) -> str:
+def _extract_snippet(meta: Dict[str, Any]) -> str:
     for k in ("text","chunk","content","body","passage"):
         v = meta.get(k)
         if isinstance(v, str) and v.strip():
@@ -175,16 +175,19 @@ def _clean_title(title: str) -> str:
             t = first
     return re.sub(r"\s+", " ", t.replace("_", " ")).strip(" -–—")
 
-def _dedup_and_rank_sources(matches, top_k: int):
+def _listing_title(meta: Dict[str, Any]) -> str:
+    return _clean_title(meta.get("title") or meta.get("doc_parent") or "Unknown")
+
+def _dedup_and_rank_sources(matches: List[Dict[str, Any]], top_k: int):
     rank = {"L1":1,"L2":2,"L3":3,"L4":4,"L5":5}
-    best = {}
+    best: Dict[Any, Dict[str, Any]] = {}
     for m in (matches or []):
         meta  = m.get("metadata", {}) if isinstance(m, dict) else getattr(m, "metadata", {}) or {}
         title = _listing_title(meta)
         lvl   = (meta.get("doc_level") or meta.get("level") or "N/A").strip()
         page  = str(meta.get("page", "?"))
         ver   = str(meta.get("version", meta.get("v", ""))) if meta.get("version", meta.get("v", "")) else ""
-        score = float(m.get("score") if isinstance(m, d := dict) else getattr(m, "score", 0.0))
+        score = float(m.get("score") if isinstance(m, dict) else getattr(m, "score", 0.0))
         key   = (title, lvl, page, ver)
         if key not in best or score > best[key]["score"]:
             best[key] = {"title": title, "level": lvl, "page": page, "version": ver, "score": score, "meta": meta}
@@ -192,10 +195,7 @@ def _dedup_and_rank_sources(matches, top_k: int):
     uniq.sort(key=lambda s: (rank.get(s["level"], 99), -s["score"]))
     return uniq[:top_k]
 
-def _listing_title(meta):
-    return _clean_title(meta.get("title") or meta.get("doc_parent") or "Unknown")
-
-def _titles_only(uniq_sources: list[dict]) -> list[str]:
+def _titles_only(uniq_sources: List[Dict[str, Any]]) -> List[str]:
     seen, out = set(), []
     for s in uniq_sources:
         t = s["title"]
@@ -204,7 +204,7 @@ def _titles_only(uniq_sources: list[dict]) -> list[str]:
     return out
 
 # ========== SYNTHESIS ==========
-def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]) -> str:
+def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets: List[str]) -> str:
     """
     Synthesizes a clean HTML answer using a system message that enforces:
     - HTML-only output (no markdown asterisks)
@@ -277,7 +277,7 @@ def ensure_chat(conn, user_id: str, chat_id: Optional[str]) -> str:
     return new_id
 
 def insert_message(conn, chat_id: str, user_id: Optional[str], role: str,
-                   content_html: str, content_raw: Optional[str], meta: dict):
+                   content_html: str, content_raw: Optional[str], meta: Dict[str, Any]):
     cur = conn.cursor()
     mid = str(uuid.uuid4())
     now = iso_now()
@@ -372,7 +372,7 @@ def delete_chat(chat_id: str, user_id: str = Depends(get_current_user)):
     conn.close()
     return {"ok": True}
 
-# ========== WIDGET (Sidebar with Profile + Chat Tabs, rename, logout; NO API token field) ==========
+# ========== WIDGET (Sidebar with Profile + Chat Tabs, rename, logout) ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -399,7 +399,6 @@ WIDGET_HTML = """<!doctype html>
   .input{flex:1; border:1px solid var(--border); border-radius:10px; padding:6px 8px; background:#fff; color:#000}
   .btn{cursor:pointer; border:1px solid var(--border); background:#fff; color:#000; padding:6px 10px; border-radius:10px}
   .btn.primary{background:#000; color:#fff; border-color:#000}
-  .btn.link{background:transparent; border:none; color:#2563eb; text-decoration:underline; padding:0}
   .chats{flex:1; overflow:auto; padding:8px}
   .chatitem{display:flex; justify-content:space-between; align-items:center; border:1px solid var(--border); background:#fff; padding:8px 10px; border-radius:10px; margin-bottom:8px}
   .chatitem .meta{font-size:12px; color:#6b7280}
@@ -597,7 +596,7 @@ WIDGET_HTML = """<!doctype html>
   }
 
   // ====== Profile save / logout ======
-  elPfSave.addEventListener('click', ()=>{
+  document.getElementById('pf-save').addEventListener('click', ()=>{
     const uid = elPfId.value.trim();
     const em  = elPfEmail.value.trim();
     if(!uid){ elPfMsg.textContent='Client ID is required.'; return; }
@@ -610,8 +609,7 @@ WIDGET_HTML = """<!doctype html>
     loadChats();
   });
 
-  elPfLogout.addEventListener('click', ()=>{
-    // Clear local profile and UI state
+  document.getElementById('pf-logout').addEventListener('click', ()=>{
     localStorage.removeItem('userId');
     localStorage.removeItem('email');
     state.userId = '';
@@ -638,11 +636,17 @@ WIDGET_HTML = """<!doctype html>
         row.className = 'chatitem' + (currentChatId===ch.id ? ' active' : '');
         row.dataset.id = ch.id;
 
+        const left = document.createElement('div');
         const title = document.createElement('div');
         title.className = 'title';
         title.textContent = ch.title || 'Untitled';
         title.title = ch.title || 'Untitled';
         title.addEventListener('click', ()=> openChat(ch.id));
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.textContent = new Date(ch.updated_at).toLocaleString();
+        left.appendChild(title);
+        left.appendChild(meta);
 
         const actions = document.createElement('div');
         actions.className = 'actions';
@@ -657,10 +661,8 @@ WIDGET_HTML = """<!doctype html>
           if(newTitle !== null){
             const fd = new FormData();
             fd.append('title', newTitle);
-            try {
-              await postForm(`/chats/${ch.id}/title`, fd);
-              loadChats();
-            } catch(err){ alert('Rename failed: '+err); }
+            try { await postForm(`/chats/${ch.id}/title`, fd); loadChats(); }
+            catch(err){ alert('Rename failed: '+err); }
           }
         });
 
@@ -671,33 +673,19 @@ WIDGET_HTML = """<!doctype html>
         btnDelete.addEventListener('click', async (e)=>{
           e.stopPropagation();
           if(confirm('Delete this chat?')){
-            try {
-              await del(`/chats/${ch.id}`);
-              if (currentChatId === ch.id) {
-                currentChatId = null;
-                elThread.innerHTML = '';
-              }
-              loadChats();
-            } catch(err){ alert('Delete failed: '+err); }
+            try { await del(`/chats/${ch.id}`); if (currentChatId === ch.id) { currentChatId = null; elThread.innerHTML=''; } loadChats(); }
+            catch(err){ alert('Delete failed: '+err); }
           }
         });
 
         actions.appendChild(btnRename);
         actions.appendChild(btnDelete);
 
-        const left = document.createElement('div');
-        left.appendChild(title);
-        const meta = document.createElement('div');
-        meta.className = 'meta';
-        meta.textContent = new Date(ch.updated_at).toLocaleString();
-        left.appendChild(meta);
-
         row.appendChild(left);
         row.appendChild(actions);
         elChatList.appendChild(row);
       });
       if (!currentChatId && data.items && data.items.length) {
-        // auto-select most recent on login
         currentChatId = data.items[0].id;
         openChat(currentChatId);
       }
@@ -771,9 +759,7 @@ WIDGET_HTML = """<!doctype html>
 
     // auto-title current chat with first message if unnamed
     if (currentChatId) {
-      const fd = new FormData();
-      fd.append('title', q.slice(0, 60));
-      // fire and forget
+      const fd = new FormData(); fd.append('title', q.slice(0, 60));
       postForm(`/chats/${currentChatId}/title`, fd).catch(()=>{});
     }
 
@@ -786,7 +772,7 @@ WIDGET_HTML = """<!doctype html>
       const files = Array.from(elFile.files || []);
       const data  = files.length ? await callReview(q, files, currentChatId) : await callRag(q, currentChatId);
       if (data && data.chat_id) currentChatId = data.chat_id;
-      loadChats(); // refresh list and highlight
+      loadChats(); // refresh list order
 
       let html = (data && data.answer) ? data.answer : '';
       const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
@@ -871,8 +857,8 @@ def diag():
 def search_endpoint(
     question: str = Query(..., min_length=3),
     top_k: int = Query(12, ge=1, le=30),
-    level: str | None = Query(None),
-    authorization: str | None = Header(default=None),
+    level: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
     user_id: str = Depends(get_current_user),
 ):
     require_auth(authorization)
@@ -909,8 +895,8 @@ def rag_endpoint(
     question: str = Query(..., min_length=3),
     chat_id: Optional[str] = Query(None),
     top_k: int = Query(12, ge=1, le=30),
-    level: str | None = Query(None),
-    authorization: str | None = Header(default=None),
+    level: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
     user_id: str = Depends(get_current_user),
 ):
     require_auth(authorization)
@@ -939,10 +925,10 @@ def rag_endpoint(
 # ========== /review (PDF/TXT/DOCX) + PERSISTENCE ==========
 @app.post("/review")
 def review_endpoint(
-    authorization: str | None = Header(default=None),
+    authorization: Optional[str] = Header(None),
     chat_id: Optional[str] = Form(None),
     question: str = Form(""),
-    files: list[UploadFile] = File(default=[]),
+    files: List[UploadFile] = File(default=[]),
     user_id: str = Depends(get_current_user),
 ):
     require_auth(authorization)
@@ -954,7 +940,7 @@ def review_endpoint(
         chat_id = ensure_chat(conn, user_id, chat_id)
         insert_message(conn, chat_id, user_id, "user", content_html=f"<p>{question}</p>", content_raw=question, meta={"upload": True})
 
-        texts = []
+        texts: List[str] = []
         for f in files:
             name = (f.filename or "").lower()
             raw  = f.file.read(UPLOAD_MAX_BYTES + 1)
@@ -971,9 +957,11 @@ def review_endpoint(
                     texts.append("\n".join(pages))
                 except Exception as e:
                     raise HTTPException(status_code=415, detail=f"Failed to parse PDF: {f.filename} ({e})")
-            elif name endswith(".txt"):
-                try: texts.append(raw.decode("utf-8", errors="ignore"))
-                except Exception: texts.append(raw.decode("latin-1", errors="ignore"))
+            elif name.endswith(".txt"):
+                try:
+                    texts.append(raw.decode("utf-8", errors="ignore"))
+                except Exception:
+                    texts.append(raw.decode("latin-1", errors="ignore"))
             elif name.endswith(".docx"):
                 try:
                     try:
@@ -991,6 +979,7 @@ def review_endpoint(
                     raise HTTPException(status_code=415, detail=f"Failed to parse DOCX: {f.filename} ({e})")
             else:
                 raise HTTPException(status_code=415, detail=f"Unsupported file type: {f.filename} (only PDF/TXT/DOCX)")
+
         merged = "\n---\n".join([t for t in texts if t.strip()])
         chunks  = [merged[i:i+2000] for i in range(0, len(merged), 2000)][:MAX_SNIPPETS]
         pseudo  = [{"title": "Uploaded Document", "level": "L5", "page": "?", "version": "", "score": 1.0, "meta": {}}]
