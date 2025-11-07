@@ -28,6 +28,7 @@ API_TOKEN         = os.getenv("API_TOKEN", "")      # optional bearer for /searc
 SYNTH_MODEL       = os.getenv("SYNTH_MODEL", "gpt-4o-mini")
 MAX_SNIPPETS      = int(os.getenv("MAX_SNIPPETS", "20"))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "24000"))
+MAX_OUT_TOKENS = int(os.getenv("MAX_OUT_TOKENS", "8192"))  # pick a high, sane default
 UPLOAD_MAX_BYTES  = 12 * 1024 * 1024  # 12 MB
 
 app = FastAPI(title="Private Trust Fiduciary Advisor API")
@@ -166,17 +167,13 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
 
     # 🔹 NEW: System message with your additional instructions
     system_msg = (
-        "Always respond using clean, valid HTML (no markdown asterisks). "
-        "Render bold with <strong>, italics with <em>, headings with <h1>-<h6>, "
-        "lists with <ul>/<ol>, code with <pre><code>, and links with <a>. "
-        "Do not include backticks or markdown symbols in the final output. "
     )
 
     try:
         res = client.chat.completions.create(
             model=SYNTH_MODEL,
             temperature=0.15,
-            max_tokens=2200,
+            max_tokens=MAX_OUT_TOKENS,
             messages=[
                 {"role": "system", "content": system_msg},   # ← additional instructions live here
                 {"role": "user", "content": user_msg},
