@@ -77,6 +77,7 @@ def _clean_openai_key(raw: str) -> str:
     s = (raw or "").strip()
     if not s.startswith("sk-"):
         parts = [t.strip() for t in s.replace("=", " ").split() if t.strip().startswith("sk-")]
+    # pick last candidate that starts with sk-
         if parts:
             s = parts[-1]
     if not s.startswith("sk-"):
@@ -164,6 +165,7 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
         html = (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content.strip()
         if not html:
             return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
+        # if model sent plain text, wrap minimally
         if "<" not in html:
             html = "<div><p>" + html.replace("\n", "<br>") + "</p></div>"
         return html
@@ -275,62 +277,94 @@ WIDGET_HTML = """<!doctype html>
     elThread.scrollTop = elThread.scrollHeight;
   }
 
+  // Normalize common trust/contract bold templates into colon-style lines (no asterisks).
+  function normalizeTrustDoc(html){
+    let out = html;
+
+    // Convert bold ALL-CAPS line into a plain heading + blank line
+    out = out.replace(/<p>\s*<strong>\s*([A-Z0-9][A-Z0-9\s\-&,.'()]+?)\s*<\/strong>\s*<\/p>/g,
+                      '<h2>$1</h2><p></p>');
+
+    // Map <strong>LABEL:</strong> to "Label:"
+    const map = [
+      {re:/<strong>\s*TRUST NAME\s*:\s*<\/strong>/gi, rep:'Trust: '},
+      {re:/<strong>\s*TRUST\s*NAME\s*<\/strong>\s*:\s*/gi, rep:'Trust: '},
+      {re:/<strong>\s*DATE\s*:\s*<\/strong>/gi, rep:'Date: '},
+      {re:/<strong>\s*TAX\s*YEAR\s*:\s*<\/strong>/gi, rep:'Tax Year: '},
+      {re:/<strong>\s*TRUSTEE\(S\)\s*:\s*<\/strong>/gi, rep:'Trustee(s): '},
+      {re:/<strong>\s*LOCATION\s*:\s*<\/strong>/gi, rep:'Location: '},
+    ];
+    map.forEach(({re,rep})=>{ out = out.replace(re, rep); });
+
+    // Also handle when model emits **LABEL:** (before our MD conversion)—just in case
+    out = out.replace(/\*\*\s*TRUST NAME\s*:\s*\*\*/gi, 'Trust: ')
+             .replace(/\*\*\s*DATE\s*:\s*\*\*/gi, 'Date: ')
+             .replace(/\*\*\s*TAX\s*YEAR\s*:\s*\*\*/gi, 'Tax Year: ')
+             .replace(/\*\*\s*TRUSTEE\(S\)\s*:\s*\*\*/gi, 'Trustee(s): ')
+             .replace(/\*\*\s*LOCATION\s*:\s*\*\*/gi, 'Location: ');
+
+    // Remove any remaining bold markup around labels like <strong>Label:</strong>value
+    out = out.replace(/<strong>\s*([A-Za-z][A-Za-z()\s]+:)\s*<\/strong>\s*/g, '$1 ');
+
+    return out;
+  }
+
   // Markdown -> HTML with full formatting (bold, italic, links, blockquotes, code, lists).
   function mdToHtml(md){
     if(!md) return '';
     // If already HTML-ish, trust it so <strong>/<em>/<a> from the model are preserved.
-    if (/<\\w+[^>]*>/.test(md)) return md;
+    if (/<\w+[^>]*>/.test(md)) return md;
 
     let h = md;
 
-    // Escape basic HTML first to avoid injection, we'll selectively re-add tags via replacements
+    // Escape basic HTML first, then selectively add tags
     h = h.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
     // Code blocks ``` ```
-    h = h.replace(/```([\\s\\S]*?)```/g, (_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+    h = h.replace(/```([\s\S]*?)```/g, (_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
 
     // Inline code `code`
     h = h.replace(/`([^`]+?)`/g, '<code>$1</code>');
 
     // Headings
-    h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>')
-         .replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>')
-         .replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
+    h = h.replace(/^######\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\s+(.*)$/gm,'<h5>$1</h5>')
+         .replace(/^####\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\s+(.*)$/gm,'<h3>$1</h3>')
+         .replace(/^##\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\s+(.*)$/gm,'<h1>$1</h1>');
 
     // Blockquotes
-    h = h.replace(/^>\\s?(.*)$/gm, '<blockquote>$1</blockquote>');
+    h = h.replace(/^>\s?(.*)$/gm, '<blockquote>$1</blockquote>');
 
     // Bold / italic
-    h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>')
+    h = h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
          .replace(/__(.+?)__/g,'<strong>$1</strong>')
-         .replace(/\\*(?!\\s)(.+?)\\*/g,'<em>$1</em>')
-         .replace(/_(?!\\s)(.+?)_/g,'<em>$1</em>');
+         .replace(/\*(?!\s)(.+?)\*/g,'<em>$1</em>')
+         .replace(/_(?!\s)(.+?)_/g,'<em>$1</em>');
 
     // Links: [text](url)
-    h = h.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
 
     // Autolink bare URLs
-    h = h.replace(/(^|\\s)(https?:\\/\\/[^\\s<]+)(?=\\s|$)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    h = h.replace(/(^|\s)(https?:\/\/[^\s<]+)(?=\s|$)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
 
     // Ordered lists
-    // Convert lines starting with "1. " etc to <ol><li>..</li></ol>
-    h = h.replace(/(?:^|\\n)(\\d+)\\.\\s+(.+)(?:(?=\\n\\d+\\.\\s)|$)/gms, (m)=>{
-      const items = m.trim().split(/\\n(?=\\d+\\.\\s)/).map(it=>it.replace(/^\\d+\\.\\s+/, '')).map(t=>`<li>${t}</li>`).join('');
+    h = h.replace(/(?:^|\n)(\d+)\.\s+(.+)(?:(?=\n\d+\.\s)|$)/gms, (m)=>{
+      const items = m.trim().split(/\n(?=\d+\.\s)/).map(it=>it.replace(/^\d+\.\s+/, '')).map(t=>`<li>${t}</li>`).join('');
       return `<ol>${items}</ol>`;
     });
 
     // Unordered lists
-    h = h.replace(/(?:^|\\n)[*-]\\s+(.+)(?:(?=\\n[*-]\\s)|$)/gms, (m)=>{
-      const items = m.trim().split(/\\n(?=[*-]\\s)/).map(it=>it.replace(/^[*-]\\s+/, '')).map(t=>`<li>${t}</li>`).join('');
+    h = h.replace(/(?:^|\n)[*-]\s+(.+)(?:(?=\n[*-]\s)|$)/gms, (m)=>{
+      const items = m.trim().split(/\n(?=[*-]\s)/).map(it=>it.replace(/^[*-]\s+/, '')).map(t=>`<li>${t}</li>`).join('');
       return `<ul>${items}</ul>`;
     });
 
-    // Paragraphs (add <p> around loose lines)
-    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
+    // Paragraphs
+    h = h.replace(/\n{2,}/g,'</p><p>').replace(/^(?!<h\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
 
     return h;
   }
 
+  // === API helpers ===
   async function callRag(q){
     const url=new URL('/rag', location.origin);
     url.searchParams.set('question', q);
@@ -354,13 +388,13 @@ WIDGET_HTML = """<!doctype html>
     tmp.querySelectorAll('div').forEach(d=>{
       if (d.innerHTML === "<br>") d.innerHTML = "\\n";
     });
-    const text = tmp.innerText.replace(/\\u00A0/g,' ').trim();
+    const text = tmp.innerText.replace(/\u00A0/g,' ').trim();
     return text;
   }
 
   async function handleSend(q){
     if(!q) return;
-    addMessage('user', q.replace(/\\n/g,'<br>'));
+    addMessage('user', q.replace(/\n/g,'<br>'));
     lastQuestion = q;
 
     const work = document.createElement('div');
@@ -372,8 +406,14 @@ WIDGET_HTML = """<!doctype html>
       const files = Array.from(elFile.files || []);
       const data = files.length ? await callReview(q, files) : await callRag(q);
       let html = (data && data.answer) ? data.answer : '';
-      const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
-      const rendered = looksHtml ? html : mdToHtml(String(html||''));
+
+      // If model already returned HTML, use it; otherwise convert markdown to HTML
+      const looksHtml = typeof html==='string' && /<\w+[^>]*>/.test(html);
+      let rendered = looksHtml ? html : mdToHtml(String(html||''));
+
+      // Normalize common trust/contract templates (remove asterisks, map labels)
+      rendered = normalizeTrustDoc(rendered);
+
       work.querySelector('.meta').textContent = 'Advisor · ' + now();
       work.querySelector('.bubble').outerHTML = `<div class="bubble">${rendered}</div>`;
     }catch(e){
