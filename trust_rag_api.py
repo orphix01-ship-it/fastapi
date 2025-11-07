@@ -28,7 +28,7 @@ API_TOKEN         = os.getenv("API_TOKEN", "")      # optional bearer for /searc
 SYNTH_MODEL       = os.getenv("SYNTH_MODEL", "gpt-4o")
 MAX_SNIPPETS      = int(os.getenv("MAX_SNIPPETS", "20"))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "24000"))
-MAX_OUT_TOKENS = int(os.getenv("MAX_OUT_TOKENS", "32768"))  # pick a high, sane default
+MAX_OUT_TOKENS = int(os.getenv("MAX_OUT_TOKENS", "16384"))  # pick a high, sane default
 UPLOAD_MAX_BYTES  = 12 * 1024 * 1024  # 12 MB
 
 app = FastAPI(title="Private Trust Fiduciary Advisor API")
