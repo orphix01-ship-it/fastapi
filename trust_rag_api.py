@@ -77,9 +77,7 @@ def _clean_openai_key(raw: str) -> str:
     s = (raw or "").strip()
     if not s.startswith("sk-"):
         parts = [t.strip() for t in s.replace("=", " ").split() if t.strip().startswith("sk-")]
-    # pick last candidate that starts with sk-
-        if parts:
-            s = parts[-1]
+        if parts: s = parts[-1]
     if not s.startswith("sk-"):
         raise RuntimeError("OPENAI_API_KEY appears malformed.")
     return s
@@ -129,8 +127,7 @@ def _titles_only(uniq_sources: list[dict]) -> list[str]:
     for s in uniq_sources:
         t = s["title"]
         if t not in seen:
-            seen.add(t)
-            out.append(t)
+            seen.add(t); out.append(t)
     return out
 
 # ========== SYNTHESIS ==========
@@ -141,13 +138,10 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
     buf, used, kept = [], 0, 0
     for s in snippets:
         s = s.strip()
-        if not s:
-            continue
-        if used + len(s) > MAX_CONTEXT_CHARS:
-            break
+        if not s: continue
+        if used + len(s) > MAX_CONTEXT_CHARS: break
         buf.append(s); used += len(s); kept += 1
-        if kept >= MAX_SNIPPETS:
-            break
+        if kept >= MAX_SNIPPETS: break
     context = "\n---\n".join(buf)
     titles = _titles_only(uniq_sources)
     titles_html = "<ul>" + "".join(f"<li>{t}</li>" for t in titles) + "</ul>" if titles else "<p></p>"
@@ -165,7 +159,6 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
         html = (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content.strip()
         if not html:
             return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
-        # if model sent plain text, wrap minimally
         if "<" not in html:
             html = "<div><p>" + html.replace("\n", "<br>") + "</p></div>"
         return html
@@ -190,7 +183,7 @@ WIDGET_HTML = """<!doctype html>
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--font)}
   .app{display:flex;flex-direction:column;height:100vh;width:100%}
-  .header{background:#fff;border-bottom:1px solid var(--border)}
+  .header{background:#fff}
   .header .inner{max-width:900px;margin:0 auto;padding:14px 16px;text-align:center}
   .title{font-family:var(--title);font-weight:300;letter-spacing:.2px;color:#000;font-size:20px}
 
@@ -211,17 +204,21 @@ WIDGET_HTML = """<!doctype html>
   .bubble p{margin:.6em 0}
   .bubble ul, .bubble ol{margin:.4em 0 .6em 1.4em}
   .bubble a{color:#000;text-decoration:underline}
+  .bubble strong{font-weight:700}
+  .bubble em{font-style:italic}
   .bubble code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono","Roboto Mono","Oxygen Mono","Ubuntu Mono","Courier New",monospace;background:#fff;border:1px solid var(--border);padding:.1em .3em;border-radius:6px;color:#000}
   .bubble pre{background:#fff;color:#000;border:1px solid var(--border);padding:12px;border-radius:12px;overflow:auto}
   .bubble blockquote{border-left:3px solid #000;padding:6px 12px;margin:8px 0;background:#fafafa}
 
-  .composer{position:fixed;bottom:0;left:0;right:0;background:#fff;padding:18px 12px;border-top:1px solid var(--border)}
+  .composer{position:fixed;bottom:0;left:0;right:0;background:#fff;padding:18px 12px; /* no divider */ border-top:none}
   .composer .inner{max-width:900px;margin:0 auto}
   .bar{display:flex;align-items:flex-end;gap:8px;background:#fff;border:1px solid var(--ring);border-radius:22px;padding:8px;box-shadow:var(--shadow)}
   .input{flex:1;min-height:24px;max-height:160px;overflow:auto;outline:none;padding:8px 10px;font:16px/1.5 var(--font);color:#000}
   .input:empty:before{content:attr(data-placeholder);color:#000}
-  .send{padding:8px 14px;border-radius:12px;background:#000;color:#fff;border:1px solid #000;cursor:pointer}
-  .attach{padding:8px 12px;border-radius:12px;background:#fff;color:#000;border:1px solid var(--border);cursor:pointer}
+  .btn{cursor:pointer}
+
+  .send{padding:8px 12px;border-radius:12px;background:#000;color:#fff;border:1px solid #000}
+  .attach{padding:8px 10px;border-radius:12px;background:#fff;color:#000;border:1px solid var(--border)}
 
   a{color:#000;text-decoration:underline}
   a:hover{text-decoration:none}
@@ -246,8 +243,13 @@ WIDGET_HTML = """<!doctype html>
       <div class="bar">
         <input id="file" type="file" multiple accept=".pdf,.txt,.docx" />
         <div id="input" class="input" role="textbox" aria-multiline="true" contenteditable="true" data-placeholder="Message the Advisor… (Shift+Enter for newline)"></div>
-        <button id="attach" class="attach" title="Add files">+</button>
-        <button id="send" class="send" title="Send">Send</button>
+        <button id="attach" class="attach btn" type="button" title="Add files">+</button>
+        <button id="send" class="send btn" type="button" title="Send" aria-label="Send">
+          <!-- paper-plane icon -->
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="m5 12 14-7-4 14-3-5-7-2z" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
       </div>
       <div id="filehint" style="margin-top:8px;color:#000;font-size:12px;">
         State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.
@@ -277,34 +279,33 @@ WIDGET_HTML = """<!doctype html>
     elThread.scrollTop = elThread.scrollHeight;
   }
 
-  // Normalize common trust/contract bold templates into colon-style lines (no asterisks).
+  // Normalize common trust/contract bold templates into colon-style lines (no **asterisks** visuals)
   function normalizeTrustDoc(html){
     let out = html;
 
-    // Convert bold ALL-CAPS line into a plain heading + blank line
+    // Convert all-caps bold title line to heading + blank line
     out = out.replace(/<p>\s*<strong>\s*([A-Z0-9][A-Z0-9\s\-&,.'()]+?)\s*<\/strong>\s*<\/p>/g,
                       '<h2>$1</h2><p></p>');
 
-    // Map <strong>LABEL:</strong> to "Label:"
-    const map = [
-      {re:/<strong>\s*TRUST NAME\s*:\s*<\/strong>/gi, rep:'Trust: '},
-      {re:/<strong>\s*TRUST\s*NAME\s*<\/strong>\s*:\s*/gi, rep:'Trust: '},
+    // Map bold labels to "Label: " (no bold)
+    const labelMap = [
+      {re:/<strong>\s*TRUST\s*NAME\s*:\s*<\/strong>/gi, rep:'Trust: '},
       {re:/<strong>\s*DATE\s*:\s*<\/strong>/gi, rep:'Date: '},
       {re:/<strong>\s*TAX\s*YEAR\s*:\s*<\/strong>/gi, rep:'Tax Year: '},
       {re:/<strong>\s*TRUSTEE\(S\)\s*:\s*<\/strong>/gi, rep:'Trustee(s): '},
       {re:/<strong>\s*LOCATION\s*:\s*<\/strong>/gi, rep:'Location: '},
     ];
-    map.forEach(({re,rep})=>{ out = out.replace(re, rep); });
+    labelMap.forEach(({re,rep})=>{ out = out.replace(re, rep); });
 
-    // Also handle when model emits **LABEL:** (before our MD conversion)—just in case
-    out = out.replace(/\*\*\s*TRUST NAME\s*:\s*\*\*/gi, 'Trust: ')
+    // Remove any remaining bold-wrapped labels like <strong>Label:</strong>
+    out = out.replace(/<strong>\s*([A-Za-z][A-Za-z()\s]+:)\s*<\/strong>\s*/g, '$1 ');
+
+    // Also convert markdown-style **LABEL:** if it slipped through
+    out = out.replace(/\*\*\s*TRUST\s*NAME\s*:\s*\*\*/gi, 'Trust: ')
              .replace(/\*\*\s*DATE\s*:\s*\*\*/gi, 'Date: ')
              .replace(/\*\*\s*TAX\s*YEAR\s*:\s*\*\*/gi, 'Tax Year: ')
              .replace(/\*\*\s*TRUSTEE\(S\)\s*:\s*\*\*/gi, 'Trustee(s): ')
              .replace(/\*\*\s*LOCATION\s*:\s*\*\*/gi, 'Location: ');
-
-    // Remove any remaining bold markup around labels like <strong>Label:</strong>value
-    out = out.replace(/<strong>\s*([A-Za-z][A-Za-z()\s]+:)\s*<\/strong>\s*/g, '$1 ');
 
     return out;
   }
@@ -312,54 +313,51 @@ WIDGET_HTML = """<!doctype html>
   // Markdown -> HTML with full formatting (bold, italic, links, blockquotes, code, lists).
   function mdToHtml(md){
     if(!md) return '';
-    // If already HTML-ish, trust it so <strong>/<em>/<a> from the model are preserved.
-    if (/<\w+[^>]*>/.test(md)) return md;
+    // If already HTML-like, trust it so <strong>/<em>/<a> are preserved (prevents visible **asterisks**)
+    if (/<\\w+[^>]*>/.test(md)) return md;
 
     let h = md;
 
-    // Escape basic HTML first, then selectively add tags
+    // Escape first
     h = h.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
-    // Code blocks ``` ```
-    h = h.replace(/```([\s\S]*?)```/g, (_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
-
-    // Inline code `code`
+    // Code blocks
+    h = h.replace(/```([\\s\\S]*?)```/g, (_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+    // Inline code
     h = h.replace(/`([^`]+?)`/g, '<code>$1</code>');
 
     // Headings
-    h = h.replace(/^######\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\s+(.*)$/gm,'<h5>$1</h5>')
-         .replace(/^####\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\s+(.*)$/gm,'<h3>$1</h3>')
-         .replace(/^##\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\s+(.*)$/gm,'<h1>$1</h1>');
+    h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>')
+         .replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>')
+         .replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
 
     // Blockquotes
-    h = h.replace(/^>\s?(.*)$/gm, '<blockquote>$1</blockquote>');
+    h = h.replace(/^>\\s?(.*)$/gm, '<blockquote>$1</blockquote>');
 
-    // Bold / italic
-    h = h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    // Bold / italic (turn **...** and *...* into <strong>/<em>)
+    h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>')
          .replace(/__(.+?)__/g,'<strong>$1</strong>')
-         .replace(/\*(?!\s)(.+?)\*/g,'<em>$1</em>')
-         .replace(/_(?!\s)(.+?)_/g,'<em>$1</em>');
+         .replace(/\\*(?!\\s)(.+?)\\*/g,'<em>$1</em>')
+         .replace(/_(?!\\s)(.+?)_/g,'<em>$1</em>');
 
-    // Links: [text](url)
-    h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-
-    // Autolink bare URLs
-    h = h.replace(/(^|\s)(https?:\/\/[^\s<]+)(?=\s|$)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    // Links
+    h = h.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // Autolink
+    h = h.replace(/(^|\\s)(https?:\\/\\/[^\\s<]+)(?=\\s|$)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
 
     // Ordered lists
-    h = h.replace(/(?:^|\n)(\d+)\.\s+(.+)(?:(?=\n\d+\.\s)|$)/gms, (m)=>{
-      const items = m.trim().split(/\n(?=\d+\.\s)/).map(it=>it.replace(/^\d+\.\s+/, '')).map(t=>`<li>${t}</li>`).join('');
+    h = h.replace(/(?:^|\\n)(\\d+)\\.\\s+(.+)(?:(?=\\n\\d+\\.\\s)|$)/gms, (m)=>{
+      const items = m.trim().split(/\\n(?=\\d+\\.\\s)/).map(it=>it.replace(/^\\d+\\.\\s+/, '')).map(t=>`<li>${t}</li>`).join('');
       return `<ol>${items}</ol>`;
     });
-
     // Unordered lists
-    h = h.replace(/(?:^|\n)[*-]\s+(.+)(?:(?=\n[*-]\s)|$)/gms, (m)=>{
-      const items = m.trim().split(/\n(?=[*-]\s)/).map(it=>it.replace(/^[*-]\s+/, '')).map(t=>`<li>${t}</li>`).join('');
+    h = h.replace(/(?:^|\\n)[*-]\\s+(.+)(?:(?=\\n[*-]\\s)|$)/gms, (m)=>{
+      const items = m.trim().split(/\\n(?=[*-]\\s)/).map(it=>it.replace(/^[*-]\\s+/, '')).map(t=>`<li>${t}</li>`).join('');
       return `<ul>${items}</ul>`;
     });
 
     // Paragraphs
-    h = h.replace(/\n{2,}/g,'</p><p>').replace(/^(?!<h\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
+    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
 
     return h;
   }
@@ -388,13 +386,13 @@ WIDGET_HTML = """<!doctype html>
     tmp.querySelectorAll('div').forEach(d=>{
       if (d.innerHTML === "<br>") d.innerHTML = "\\n";
     });
-    const text = tmp.innerText.replace(/\u00A0/g,' ').trim();
+    const text = tmp.innerText.replace(/\\u00A0/g,' ').trim();
     return text;
   }
 
   async function handleSend(q){
     if(!q) return;
-    addMessage('user', q.replace(/\n/g,'<br>'));
+    addMessage('user', q.replace(/\\n/g,'<br>'));
     lastQuestion = q;
 
     const work = document.createElement('div');
@@ -408,10 +406,10 @@ WIDGET_HTML = """<!doctype html>
       let html = (data && data.answer) ? data.answer : '';
 
       // If model already returned HTML, use it; otherwise convert markdown to HTML
-      const looksHtml = typeof html==='string' && /<\w+[^>]*>/.test(html);
+      const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
       let rendered = looksHtml ? html : mdToHtml(String(html||''));
 
-      // Normalize common trust/contract templates (remove asterisks, map labels)
+      // Normalize trust/contract label formatting to colon style, remove bold labels/asterisks artifacts
       rendered = normalizeTrustDoc(rendered);
 
       work.querySelector('.meta').textContent = 'Advisor · ' + now();
@@ -432,6 +430,8 @@ WIDGET_HTML = """<!doctype html>
       handleSend(q);
     }
   });
+
+  // Click handlers (explicit type="button" so no form submit interference)
   elSend.addEventListener('click', ()=>{
     const q = readInput();
     if (!q) return;
