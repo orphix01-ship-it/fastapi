@@ -14,31 +14,31 @@ try:
 except Exception:
     pass
 
+# remove proxies so SDK never injects `proxies=` automatically
 for _k in ("HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy",
            "OPENAI_PROXY","OPENAI_HTTP_PROXY","OPENAI_HTTPS_PROXY"):
     os.environ.pop(_k, None)
 os.environ.setdefault("NO_PROXY", "*")
 
+# ignore broken custom base url
 if os.getenv("OPENAI_BASE_URL", "").strip().lower() in ("", "none", "null"):
     os.environ.pop("OPENAI_BASE_URL", None)
 
-API_TOKEN         = os.getenv("API_TOKEN", "")
+API_TOKEN         = os.getenv("API_TOKEN", "")      # optional bearer for /search, /rag & /review
 SYNTH_MODEL       = os.getenv("SYNTH_MODEL", "gpt-4o-mini")
 MAX_SNIPPETS      = int(os.getenv("MAX_SNIPPETS", "20"))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "24000"))
-UPLOAD_MAX_BYTES  = 12 * 1024 * 1024
+UPLOAD_MAX_BYTES  = 12 * 1024 * 1024  # 12 MB
 
 app = FastAPI(title="Private Trust Fiduciary Advisor API")
 
-# Enable CORS
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# Optional metrics
+# optional metrics
 try:
     from prometheus_fastapi_instrumentator import Instrumentator
     Instrumentator().instrument(app).expose(app, endpoint="/metrics")
@@ -144,9 +144,7 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
             continue
         if used + len(s) > MAX_CONTEXT_CHARS:
             break
-        buf.append(s)
-        used += len(s)
-        kept += 1
+        buf.append(s); used += len(s); kept += 1
         if kept >= MAX_SNIPPETS:
             break
     context = "\n---\n".join(buf)
@@ -154,9 +152,9 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
     titles_html = "<ul>" + "".join(f"<li>{t}</li>" for t in titles) + "</ul>" if titles else "<p></p>"
 
     user_msg = (
-        f"<h2>Question</h2><p>{question}</p>"
-        f"<h3>Context</h3><pre>{context}</pre>"
-        f"<h3>Citations</h3>{titles_html}"
+        f"<h2>Question</h2>\n<p>{question}</p>\n"
+        f"<h3>Context</h3>\n<pre>{context}</pre>\n"
+        f"<h3>Citations</h3>\n{titles_html}"
     )
     try:
         res = client.chat.completions.create(
@@ -172,7 +170,7 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
     except Exception as e:
         return f"<p><em>(Synthesis unavailable: {e})</em></p>"
 
-# ========== WIDGET ==========
+# ========== WIDGET (no avatars, no initial advisor bubble, user light-blue, advisor unboxed) ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -182,7 +180,7 @@ WIDGET_HTML = """<!doctype html>
 <style>
   :root{
     --bg:#ffffff; --text:#000000; --border:#e5e5e5; --ring:#d9d9d9;
-    --user:#e8f1ff;
+    --user:#e8f1ff; /* light blue for user's question */
     --shadow:0 1px 2px rgba(0,0,0,.03), 0 8px 24px rgba(0,0,0,.04);
     --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial;
     --title:"Cinzel",serif;
@@ -193,129 +191,171 @@ WIDGET_HTML = """<!doctype html>
   .header{background:#fff;border-bottom:1px solid var(--border)}
   .header .inner{max-width:900px;margin:0 auto;padding:14px 16px;text-align:center}
   .title{font-family:var(--title);font-weight:300;letter-spacing:.2px;color:#000;font-size:20px}
+
   .main{flex:1;overflow:auto;padding:24px 12px 140px}
   .container{max-width:900px;margin:0 auto}
   .thread{display:flex;flex-direction:column;gap:16px}
+
   .msg{padding:0;border:0;background:transparent}
+  .msg .bubble{display:inline-block;max-width:80%}
   .msg.user .bubble{
-    background:var(--user);border:1px solid var(--border);
-    border-radius:14px;padding:12px 14px;box-shadow:var(--shadow);
-    display:inline-block;max-width:80%;
+    background:var(--user); border:1px solid var(--border);
+    border-radius:14px; padding:12px 14px; box-shadow:var(--shadow);
   }
-  .msg.advisor .bubble{background:transparent;padding:0;max-width:100%}
+  .msg.advisor .bubble{background:transparent; padding:0; max-width:100%}
   .meta{font-size:12px;margin-bottom:6px;color:#000}
+
   .bubble h1,.bubble h2,.bubble h3{margin:.6em 0 .4em}
   .bubble p{margin:.6em 0}
   .bubble ul{margin:.4em 0 .6em 1.2em}
   .bubble code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono","Roboto Mono","Oxygen Mono","Ubuntu Mono","Courier New",monospace;background:#fff;border:1px solid var(--border);padding:.1em .3em;border-radius:6px;color:#000}
   .bubble pre{background:#fff;color:#000;border:1px solid var(--border);padding:12px;border-radius:12px;overflow:auto}
+
   .composer{position:fixed;bottom:0;left:0;right:0;background:#fff;padding:18px 12px;border-top:1px solid var(--border)}
   .composer .inner{max-width:900px;margin:0 auto}
   .bar{display:flex;align-items:flex-end;gap:8px;background:#fff;border:1px solid var(--ring);border-radius:22px;padding:8px;box-shadow:var(--shadow)}
   .input{flex:1;min-height:24px;max-height:160px;overflow:auto;outline:none;padding:8px 10px;font:16px/1.5 var(--font);color:#000}
   .input:empty:before{content:attr(data-placeholder);color:#000}
   .send{padding:8px 14px;border-radius:12px;background:#000;color:#fff;border:1px solid #000;cursor:pointer}
+
   a{color:#000;text-decoration:underline}
   a:hover{text-decoration:none}
+
+  #file{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(1px,1px,1px,1px)}
 </style>
 </head>
 <body>
 <div class="app">
-  <div class="header"><div class="inner"><div class="title">Private Trust Fiduciary Advisor</div></div></div>
-  <main class="main"><div class="container"><div id="thread" class="thread"></div></div></main>
-  <div class="composer"><div class="inner">
-    <div class="bar">
-      <input id="file" type="file" multiple accept=".pdf,.txt,.docx"/>
-      <div id="input" class="input" role="textbox" aria-multiline="true" contenteditable="true" data-placeholder="Message the Advisor… (Shift+Enter for newline)"></div>
-      <button id="send" class="send" title="Send">Send</button>
+  <div class="header">
+    <div class="inner"><div class="title">Private Trust Fiduciary Advisor</div></div>
+  </div>
+
+  <main class="main">
+    <div class="container">
+      <div id="thread" class="thread"></div>
     </div>
-    <div style="margin-top:8px;color:#000;font-size:12px;">
-      State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.
+  </main>
+
+  <div class="composer">
+    <div class="inner">
+      <div class="bar">
+        <input id="file" type="file" multiple accept=".pdf,.txt,.docx" />
+        <div id="input" class="input" role="textbox" aria-multiline="true" contenteditable="true" data-placeholder="Message the Advisor… (Shift+Enter for newline)"></div>
+        <button id="send" class="send" title="Send">Send</button>
+      </div>
+      <div style="margin-top:8px;color:#000;font-size:12px;">
+        State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.
+      </div>
     </div>
-  </div></div>
+  </div>
 </div>
+
 <script>
-const elThread=document.getElementById('thread');
-const elInput=document.getElementById('input');
-const elSend=document.getElementById('send');
-const elFile=document.getElementById('file');
-let lastQuestion="";
-function now(){return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});}
-function addMessage(role,html){
-  const wrap=document.createElement('div');
-  wrap.className='msg '+(role==='user'?'user':'advisor');
-  const meta=`<div class="meta">${role==='user'?'You':'Advisor'} · ${now()}</div>`;
-  wrap.innerHTML=meta+`<div class="bubble">${html}</div>`;
-  elThread.appendChild(wrap);
-  elThread.scrollTop=elThread.scrollHeight;
-}
-// Minimal Markdown → HTML (fallback only). If backend returns HTML, we render it directly.
-function mdToHtml(md){
-  if(!md)return'';
-  let h=md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  h=h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
-  h=h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>')
-   .replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>')
-   .replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
-  h=h.replace(/^---$/gm,'<hr>');
-  h=h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>').replace(/__(.+?)__/g,'<strong>$1</strong>')
-   .replace(/\\*(.+?)\\*/g,'<em>$1</em>').replace(/_(.+?)_/g,'<em>$1</em>');
-  h=h.replace(/\\[(.+?)\\]\\((https?:\\/\\/[^\\)]+)\\)/g,'<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-  h=h.replace(/(?:^|\\n)[*-]\\s+(.*)/g,(m,i)=>`<li>${i}</li>`).replace(/(<li>.*<\\/li>)(\\n?)+/gs,m=>`<ul>${m}</ul>`);
-  h=h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<pre|<hr|<p|<blockquote)(.+)$/gm,'<p>$1</p>');
-  return h;
-}
-async function callRag(q){
-  const url=new URL('/rag',location.origin);
-  url.searchParams.set('question',q);url.searchParams.set('top_k','12');
-  const r=await fetch(url,{method:'GET'});if(!r.ok)throw new Error('RAG failed: '+r.status);return r.json();
-}
-async function callReview(q,files){
-  const fd=new FormData();fd.append('question',q);
-  for(const f of files)fd.append('files',f);
-  const r=await fetch('/review',{method:'POST',body:fd});
-  if(!r.ok)throw new Error('Review failed: '+r.status);return r.json();
-}
-function readInput(){
-  const tmp=elInput.cloneNode(true);
-  tmp.querySelectorAll('div').forEach(d=>{if(d.innerHTML==="<br>")d.innerHTML="\\n";});
-  const text=tmp.innerText.replace(/\\u00A0/g,' ').trim();return text;
-}
-async function handleSend(q){
-  if(!q)return;
-  addMessage('user',q.replace(/\\n/g,'<br>'));
-  lastQuestion=q;
-  const work=document.createElement('div');
-  work.className='msg advisor';
-  work.innerHTML=`<div class="meta">Advisor · thinking…</div><div class="bubble"><p>Working…</p></div>`;
-  elThread.appendChild(work);elThread.scrollTop=elThread.scrollHeight;
-  try{
-    const files=Array.from(elFile.files||[]);
-    const data=files.length?await callReview(q,files):await callRag(q);
-    let html=(data&&data.answer)?data.answer:'';
-    if(typeof html==='string'){
-      const hasHtml=/<\\s*(p|em|strong|b|i|ul|ol|li|a|h\\d|blockquote|code|pre|br)[^>]*>/i.test(html);
-      if(!hasHtml){html=mdToHtml(html);}
+  const elThread = document.getElementById('thread');
+  const elInput  = document.getElementById('input');
+  const elSend   = document.getElementById('send');
+  const elFile   = document.getElementById('file');
+
+  let lastQuestion = "";
+
+  function now(){ return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) }
+
+  function addMessage(role, html){
+    const wrap = document.createElement('div');
+    wrap.className = 'msg ' + (role === 'user' ? 'user' : 'advisor');
+    const meta = `<div class="meta">${role==='user'?'You':'Advisor'} · ${now()}</div>`;
+    wrap.innerHTML = meta + `<div class="bubble">${html}</div>`;
+    elThread.appendChild(wrap);
+    elThread.scrollTop = elThread.scrollHeight;
+  }
+
+  // Minimal MD -> HTML (ensures bold/italic render as <strong>/<em>)
+  function mdToHtml(md){
+    if(!md) return '';
+    if (/<\\w+[^>]*>/.test(md)) return md;
+    let h = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    h = h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+    h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>')
+         .replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>')
+         .replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
+    h = h.replace(/^---$/gm,'<hr>');
+    h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>')
+         .replace(/__(.+?)__/g,'<strong>$1</strong>')
+         .replace(/\\*(.+?)\\*/g,'<em>$1</em>')
+         .replace(/_(.+?)_/g,'<em>$1</em>');
+    h = h.replace(/(?:^|\\n)[*-]\\s+(.*)/g,(m,i)=>`<li>${i}</li>`)
+         .replace(/(<li>.*<\\/li>)(\\n?)+/gs,m=>`<ul>${m}</ul>`);
+    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<pre|<hr|<p|<blockquote)(.+)$/gm,'<p>$1</p>');
+    return h;
+  }
+
+  async function callRag(q){
+    const url=new URL('/rag', location.origin);
+    url.searchParams.set('question', q);
+    url.searchParams.set('top_k','12');
+    const r = await fetch(url,{method:'GET'});
+    if(!r.ok) throw new Error('RAG failed: '+r.status);
+    return r.json();
+  }
+
+  async function callReview(q, files){
+    const fd = new FormData();
+    fd.append('question', q);
+    for(const f of files) fd.append('files', f);
+    const r = await fetch('/review',{method:'POST', body:fd});
+    if(!r.ok) throw new Error('Review failed: '+r.status);
+    return r.json();
+  }
+
+  function readInput(){
+    const tmp = elInput.cloneNode(true);
+    tmp.querySelectorAll('div').forEach(d=>{
+      if (d.innerHTML === "<br>") d.innerHTML = "\\n";
+    });
+    const text = tmp.innerText.replace(/\\u00A0/g,' ').trim();
+    return text;
+  }
+
+  async function handleSend(q){
+    if(!q) return;
+    addMessage('user', q.replace(/\\n/g,'<br>'));
+    lastQuestion = q;
+
+    const work = document.createElement('div');
+    work.className = 'msg advisor';
+    work.innerHTML = `<div class="meta">Advisor · thinking…</div><div class="bubble"><p>Working…</p></div>`;
+    elThread.appendChild(work); elThread.scrollTop = elThread.scrollHeight;
+
+    try{
+      const files = Array.from(elFile.files || []);
+      const data = files.length ? await callReview(q, files) : await callRag(q);
+      let html = (data && data.answer) ? data.answer : '';
+      const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
+      const rendered = looksHtml ? html : mdToHtml(String(html||''));
+      work.querySelector('.meta').textContent = 'Advisor · ' + now();
+      work.querySelector('.bubble').outerHTML = `<div class="bubble">${rendered}</div>`;
+    }catch(e){
+      work.querySelector('.meta').textContent = 'Advisor · error';
+      work.querySelector('.bubble').innerHTML = '<p style="color:#b91c1c">Error: '+(e && e.message ? e.message : String(e))+'</p>';
     }
-    work.querySelector('.meta').textContent='Advisor · '+now();
-    work.querySelector('.bubble').outerHTML=`<div class="bubble">${html}</div>`;
-  }catch(e){
-    work.querySelector('.meta').textContent='Advisor · error';
-    work.querySelector('.bubble').innerHTML='<p style="color:#b91c1c">Error: '+(e && e.message ? e.message : String(e))+'</p>';
   }
-}
-// Send on Enter; Shift+Enter newline
-elInput.addEventListener('keydown',(ev)=>{
-  if(ev.key==='Enter'&&!ev.shiftKey){
-    ev.preventDefault();
-    const q=readInput(); if(!q)return;
-    elInput.innerHTML=''; handleSend(q);
-  }
-});
-elSend.addEventListener('click',()=>{
-  const q=readInput(); if(!q)return;
-  elInput.innerHTML=''; handleSend(q);
-});
+
+  // Send on Enter; Shift+Enter inserts newline
+  elInput.addEventListener('keydown', (ev)=>{
+    if (ev.key === 'Enter' && !ev.shiftKey){
+      ev.preventDefault();
+      const q = readInput();
+      if (!q) return;
+      elInput.innerHTML = '';
+      handleSend(q);
+    }
+  });
+  elSend.addEventListener('click', ()=>{
+    const q = readInput();
+    if (!q) return;
+    elInput.innerHTML = '';
+    handleSend(q);
+  });
 </script>
 </body>
 </html>
@@ -325,10 +365,28 @@ elSend.addEventListener('click',()=>{
 def widget():
     return HTMLResponse(WIDGET_HTML)
 
-# ========== Health ==========
+# ========== Health / Diag ==========
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.get("/diag")
+def diag():
+    info = {
+        "has_PINECONE_API_KEY": bool(os.getenv("PINECONE_API_KEY")),
+        "has_OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
+        "PINECONE_INDEX": index_name or None,
+        "PINECONE_HOST": host or None,
+        "NO_PROXY": os.getenv("NO_PROXY"),
+    }
+    try:
+        lst = pc.list_indexes()
+        info["pinecone_ok"] = True
+        info["index_count"] = len(lst or [])
+    except Exception as e:
+        info["pinecone_ok"] = False
+        info["error"] = str(e)
+    return info
 
 # ========== /search ==========
 @app.get("/search")
