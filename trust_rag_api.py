@@ -70,13 +70,12 @@ def check_rate_limit():
         raise HTTPException(status_code=429, detail="Too Many Requests")
     REQUESTS.append(now)
 
-# Simple user extractor: prefer X-User-Id (from your app auth), else "demo"
+# Resolve current user from header; default to "demo" if none
 def get_current_user(authorization: Optional[str] = Header(None),
                      x_user_id: Optional[str] = Header(None)) -> str:
-    # Wire your real auth provider here if needed
     if x_user_id and x_user_id.strip():
         return x_user_id.strip()
-    return "demo"  # safe fallback for development
+    return "demo"
 
 # ========== DB (SQLite) ==========
 DB_PATH = os.getenv("TRUST_RAG_DB", "trust_rag.db")
@@ -181,17 +180,20 @@ def _dedup_and_rank_sources(matches, top_k: int):
     best = {}
     for m in (matches or []):
         meta  = m.get("metadata", {}) if isinstance(m, dict) else getattr(m, "metadata", {}) or {}
-        title = _clean_title(meta.get("title") or meta.get("doc_parent") or "Unknown")
+        title = _listing_title(meta)
         lvl   = (meta.get("doc_level") or meta.get("level") or "N/A").strip()
         page  = str(meta.get("page", "?"))
         ver   = str(meta.get("version", meta.get("v", ""))) if meta.get("version", meta.get("v", "")) else ""
-        score = float(m.get("score") if isinstance(m, dict) else getattr(m, "score", 0.0))
+        score = float(m.get("score") if isinstance(m, d := dict) else getattr(m, "score", 0.0))
         key   = (title, lvl, page, ver)
         if key not in best or score > best[key]["score"]:
             best[key] = {"title": title, "level": lvl, "page": page, "version": ver, "score": score, "meta": meta}
     uniq = list(best.values())
     uniq.sort(key=lambda s: (rank.get(s["level"], 99), -s["score"]))
     return uniq[:top_k]
+
+def _listing_title(meta):
+    return _clean_title(meta.get("title") or meta.get("doc_parent") or "Unknown")
 
 def _titles_only(uniq_sources: list[dict]) -> list[str]:
     seen, out = set(), []
@@ -282,7 +284,7 @@ def insert_message(conn, chat_id: str, user_id: Optional[str], role: str,
     cur.execute("""INSERT INTO messages (id, chat_id, user_id, role, content_html, content_raw, meta_json, created_at)
                    VALUES (?,?,?,?,?,?,?,?)""",
                 (mid, chat_id, user_id, role, content_html, content_raw, json.dumps(meta or {}), now))
-    cur.execute("UPDATE chats SET updated_at=? WHERE id=?", (now, chat_id))
+    cur.execute("UPDATE chats SET updated_at=?, title=COALESCE(title,'New chat') WHERE id=?", (now, chat_id))
     conn.commit()
     return mid
 
@@ -370,7 +372,7 @@ def delete_chat(chat_id: str, user_id: str = Depends(get_current_user)):
     conn.close()
     return {"ok": True}
 
-# ========== WIDGET (Sidebar with Profile + Chat Tabs) ==========
+# ========== WIDGET (Sidebar with Profile + Chat Tabs, rename, logout; NO API token field) ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -383,36 +385,36 @@ WIDGET_HTML = """<!doctype html>
     --shadow:0 1px 2px rgba(0,0,0,.03), 0 8px 24px rgba(0,0,0,.04);
     --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial;
     --title:"Cinzel",serif;
-    --rail: #fafafa;
+    --rail:#fafafa;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--font)}
-
-  .app{display:grid; grid-template-columns: 280px 1fr; height:100vh; width:100%}
-  .rail{
-    border-right:1px solid var(--border); background:var(--rail); display:flex; flex-direction:column; min-width:0;
-  }
+  .app{display:grid; grid-template-columns: 280px 1fr; height:100vh}
+  .rail{border-right:1px solid var(--border); background:var(--rail); display:flex; flex-direction:column}
   .brand{padding:14px 16px; text-align:center; border-bottom:1px solid var(--border)}
   .brand .title{font-family:var(--title); font-weight:300; font-size:18px}
-  .section{padding:12px 12px; border-bottom:1px solid var(--border)}
+  .section{padding:12px; border-bottom:1px solid var(--border)}
   .label{font-size:12px; color:#6b7280; margin-bottom:6px}
   .row{display:flex; gap:6px}
   .input{flex:1; border:1px solid var(--border); border-radius:10px; padding:6px 8px; background:#fff; color:#000}
   .btn{cursor:pointer; border:1px solid var(--border); background:#fff; color:#000; padding:6px 10px; border-radius:10px}
   .btn.primary{background:#000; color:#fff; border-color:#000}
+  .btn.link{background:transparent; border:none; color:#2563eb; text-decoration:underline; padding:0}
   .chats{flex:1; overflow:auto; padding:8px}
-  .chatitem{border:1px solid var(--border); background:#fff; padding:8px 10px; border-radius:10px; margin-bottom:8px; cursor:pointer}
+  .chatitem{display:flex; justify-content:space-between; align-items:center; border:1px solid var(--border); background:#fff; padding:8px 10px; border-radius:10px; margin-bottom:8px}
+  .chatitem .meta{font-size:12px; color:#6b7280}
+  .chatitem .title{max-width:170px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer}
+  .chatitem .actions{display:flex; gap:6px}
   .chatitem.active{outline:2px solid #000}
-  .chatmeta{font-size:12px; color:#6b7280; margin-top:2px}
 
-  .main{display:flex; flex-direction:column; min-width:0}
+  .main{display:flex; flex-direction:column}
   .header{background:#fff; padding:12px 16px; border-bottom:1px solid var(--border)}
   .header .title{font-family:var(--title); font-weight:300; font-size:20px; text-align:center}
 
   .content{flex:1; overflow:auto; padding:24px 12px 140px}
   .container{max-width:900px; margin:0 auto}
   .thread{display:flex; flex-direction:column; gap:16px}
-  .msg{padding:0; border:0; background:transparent}
+  .msg{padding:0}
   .msg .bubble{display:inline-block; max-width:80%}
   .msg.user .bubble{background:var(--user); border:1px solid var(--border); border-radius:14px; padding:12px 14px; box-shadow:var(--shadow)}
   .msg.advisor .bubble{background:transparent; padding:0; max-width:100%}
@@ -428,7 +430,6 @@ WIDGET_HTML = """<!doctype html>
   .bubble pre{background:#fff;color:#000;border:1px solid var(--border);padding:12px;border-radius:12px;overflow:auto}
   .bubble blockquote{border-left:3px solid #000;padding:6px 12px;margin:8px 0;background:#fafafa}
 
-  /* Composer: NO page-wide divider */
   .composer{position:fixed; left:280px; right:0; bottom:0; background:#fff; padding:18px 12px; border-top:none}
   .bar{display:flex; align-items:flex-end; gap:8px; background:#fff; border:1px solid var(--ring); border-radius:22px; padding:8px; box-shadow:var(--shadow); max-width:900px; margin:0 auto}
   .cin{flex:1; min-height:24px; max-height:160px; overflow:auto; outline:none; padding:8px 10px; font:16px/1.5 var(--font); color:#000}
@@ -449,12 +450,12 @@ WIDGET_HTML = """<!doctype html>
         <div class="row" style="margin-bottom:6px">
           <input id="pf-id" class="input" placeholder="Client ID (required)"/>
         </div>
-        <div class="row" style="margin-bottom:6px">
+        <div class="row">
           <input id="pf-email" class="input" placeholder="Email (optional)"/>
         </div>
-        <div class="row">
-          <input id="pf-token" class="input" placeholder="API Token (optional)"/>
+        <div class="row" style="gap:8px; margin-top:8px">
           <button id="pf-save" class="btn primary">Save</button>
+          <button id="pf-logout" class="btn">Log out</button>
         </div>
         <div id="pf-msg" class="label" style="margin-top:6px;"></div>
       </div>
@@ -502,9 +503,8 @@ WIDGET_HTML = """<!doctype html>
   // ====== State ======
   let currentChatId = null;
   let state = {
-    userId: localStorage.getItem('userId') || 'demo',
-    email:  localStorage.getItem('email')  || '',
-    token:  localStorage.getItem('apiToken') || ''
+    userId: localStorage.getItem('userId') || '',
+    email:  localStorage.getItem('email')  || ''
   };
 
   // ====== Elements ======
@@ -516,15 +516,14 @@ WIDGET_HTML = """<!doctype html>
   const elHint    = document.getElementById('filehint');
   const elPfId    = document.getElementById('pf-id');
   const elPfEmail = document.getElementById('pf-email');
-  const elPfToken = document.getElementById('pf-token');
   const elPfSave  = document.getElementById('pf-save');
+  const elPfLogout= document.getElementById('pf-logout');
   const elPfMsg   = document.getElementById('pf-msg');
   const elChatList= document.getElementById('chatlist');
 
   // Prefill profile inputs
   elPfId.value    = state.userId || '';
   elPfEmail.value = state.email || '';
-  elPfToken.value = state.token || '';
 
   function now(){ return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) }
 
@@ -545,7 +544,7 @@ WIDGET_HTML = """<!doctype html>
     h = h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
     h = h.replace(/`([^`]+?)`/g,'<code>$1</code>');
     h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>').replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>').replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
-    h = h.replace(/^>\\s?(.*)$/gm,'<blockquote>$1</blockquote>');
+    h = h.replace(/^>\\s?(.*)$/gm, '<blockquote>$1</blockquote>');
     h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>').replace(/__(.+?)__/g,'<strong>$1</strong>').replace(/\\*(?!\\s)(.+?)\\*/g,'<em>$1</em>').replace(/_(?!\\s)(.+?)_/g,'<em>$1</em>');
     h = h.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
     h = h.replace(/(^|\\s)(https?:\\/\\/[^\\s<]+)(?=\\s|$)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
@@ -562,7 +561,7 @@ WIDGET_HTML = """<!doctype html>
              .replace(/__([^_]+?)__/g,'<strong>$1</strong>')
              .replace(/(^|[^*])\\*([^*\\n]+?)\\*/g,'$1<em>$2</em>')
              .replace(/(^|[^_])_([^_\\n]+?)_/g,'$1<em>$2</em>');
-    for(const {key,val} of slots) out=out.replace(key,val);
+    for(const {key,val} of slots) out=out.replace(key, val);
     return out;
   }
   function normalizeTrustDoc(html){
@@ -577,8 +576,8 @@ WIDGET_HTML = """<!doctype html>
 
   // ====== Fetch helpers with headers ======
   function hdrs(){
-    const h = { 'X-User-Id': state.userId };
-    if (state.token) h['Authorization'] = 'Bearer ' + state.token;
+    const h = {};
+    if (state.userId) h['X-User-Id'] = state.userId;
     return h;
   }
   async function getJSON(url){
@@ -591,34 +590,118 @@ WIDGET_HTML = """<!doctype html>
     if(!r.ok) throw new Error(url+': '+r.status);
     return r.json();
   }
+  async function del(url){
+    const r = await fetch(url, {method:'DELETE', headers: hdrs()});
+    if(!r.ok) throw new Error(url+': '+r.status);
+    return r.json();
+  }
 
-  // ====== Profile save ======
-  document.getElementById('pf-save').addEventListener('click', ()=>{
+  // ====== Profile save / logout ======
+  elPfSave.addEventListener('click', ()=>{
     const uid = elPfId.value.trim();
     const em  = elPfEmail.value.trim();
-    const tk  = elPfToken.value.trim();
     if(!uid){ elPfMsg.textContent='Client ID is required.'; return; }
-    state.userId = uid; state.email = em; state.token = tk;
+    state.userId = uid; state.email = em;
     localStorage.setItem('userId', uid);
     localStorage.setItem('email', em);
-    localStorage.setItem('apiToken', tk);
-    elPfMsg.textContent = 'Saved.';
-    // reload chat list for this user
+    elPfMsg.textContent = 'Saved. Loading your chats…';
+    currentChatId = null;
+    elThread.innerHTML = '';
     loadChats();
   });
 
-  // ====== Chat list / tabs ======
+  elPfLogout.addEventListener('click', ()=>{
+    // Clear local profile and UI state
+    localStorage.removeItem('userId');
+    localStorage.removeItem('email');
+    state.userId = '';
+    state.email  = '';
+    elPfId.value = '';
+    elPfEmail.value = '';
+    elPfMsg.textContent = 'Logged out. Enter Client ID to log in.';
+    currentChatId = null;
+    elChatList.innerHTML = '';
+    elThread.innerHTML = '<div class="msg advisor"><div class="meta">Advisor ·</div><div class="bubble"><p>Please sign in with your Client ID to view your chats.</p></div></div>';
+  });
+
+  // ====== Chat list / tabs, rename, delete ======
   async function loadChats(){
     elChatList.innerHTML = '';
+    if(!state.userId){
+      elChatList.innerHTML = '<div class="label">Not signed in.</div>';
+      return;
+    }
     try{
       const data = await getJSON('/chats');
       (data.items || []).forEach(ch=>{
-        const div = document.createElement('div');
-        div.className = 'chatitem' + (currentChatId===ch.id ? ' active' : '');
-        div.innerHTML = `<div>${(ch.title||'Untitled')}</div><div class="chatmeta">${new Date(ch.updated_at).toLocaleString()}</div>`;
-        div.addEventListener('click', ()=> openChat(ch.id));
-        elChatList.appendChild(div);
+        const row = document.createElement('div');
+        row.className = 'chatitem' + (currentChatId===ch.id ? ' active' : '');
+        row.dataset.id = ch.id;
+
+        const title = document.createElement('div');
+        title.className = 'title';
+        title.textContent = ch.title || 'Untitled';
+        title.title = ch.title || 'Untitled';
+        title.addEventListener('click', ()=> openChat(ch.id));
+
+        const actions = document.createElement('div');
+        actions.className = 'actions';
+
+        const btnRename = document.createElement('button');
+        btnRename.className = 'btn';
+        btnRename.textContent = '✎';
+        btnRename.title = 'Rename';
+        btnRename.addEventListener('click', async (e)=>{
+          e.stopPropagation();
+          const newTitle = prompt('New chat title:', ch.title || '');
+          if(newTitle !== null){
+            const fd = new FormData();
+            fd.append('title', newTitle);
+            try {
+              await postForm(`/chats/${ch.id}/title`, fd);
+              loadChats();
+            } catch(err){ alert('Rename failed: '+err); }
+          }
+        });
+
+        const btnDelete = document.createElement('button');
+        btnDelete.className = 'btn';
+        btnDelete.textContent = '🗑';
+        btnDelete.title = 'Delete';
+        btnDelete.addEventListener('click', async (e)=>{
+          e.stopPropagation();
+          if(confirm('Delete this chat?')){
+            try {
+              await del(`/chats/${ch.id}`);
+              if (currentChatId === ch.id) {
+                currentChatId = null;
+                elThread.innerHTML = '';
+              }
+              loadChats();
+            } catch(err){ alert('Delete failed: '+err); }
+          }
+        });
+
+        actions.appendChild(btnRename);
+        actions.appendChild(btnDelete);
+
+        const left = document.createElement('div');
+        left.appendChild(title);
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.textContent = new Date(ch.updated_at).toLocaleString();
+        left.appendChild(meta);
+
+        row.appendChild(left);
+        row.appendChild(actions);
+        elChatList.appendChild(row);
       });
+      if (!currentChatId && data.items && data.items.length) {
+        // auto-select most recent on login
+        currentChatId = data.items[0].id;
+        openChat(currentChatId);
+      }
+      elPfMsg.textContent = '';
     }catch(e){
       elChatList.innerHTML = '<div class="label">Failed to load chats.</div>';
     }
@@ -626,12 +709,9 @@ WIDGET_HTML = """<!doctype html>
 
   async function openChat(chatId){
     currentChatId = chatId;
-    // highlight active
-    document.querySelectorAll('.chatitem').forEach(x=>x.classList.remove('active'));
-    const items = Array.from(document.querySelectorAll('.chatitem'));
-    const idx = (items.findIndex(x => (x.textContent||'').includes(chatId)) ); // not reliable; refresh list
-    await loadChats(); // refresh then highlight
-    // load messages
+    document.querySelectorAll('.chatitem').forEach(x=>{
+      x.classList.toggle('active', x.dataset.id === chatId);
+    });
     elThread.innerHTML = '';
     try{
       const data = await getJSON(`/chats/${chatId}`);
@@ -645,9 +725,9 @@ WIDGET_HTML = """<!doctype html>
 
   // New chat
   document.getElementById('btn-newchat').addEventListener('click', async ()=>{
+    if(!state.userId){ elPfMsg.textContent='Please enter Client ID and Save first.'; return; }
     try{
-      const form = new FormData();
-      const res  = await postForm('/chats', form); // POST /chats returns {chat_id}
+      const res  = await postForm('/chats', new FormData());
       currentChatId = res.chat_id;
       await loadChats();
       elThread.innerHTML = '';
@@ -685,8 +765,18 @@ WIDGET_HTML = """<!doctype html>
   }
 
   async function handleSend(q){
+    if(!state.userId){ elPfMsg.textContent='Please enter Client ID and Save first.'; return; }
     if(!q) return;
     addMessage('user', q.replace(/\\n/g,'<br>'));
+
+    // auto-title current chat with first message if unnamed
+    if (currentChatId) {
+      const fd = new FormData();
+      fd.append('title', q.slice(0, 60));
+      // fire and forget
+      postForm(`/chats/${currentChatId}/title`, fd).catch(()=>{});
+    }
+
     const work = document.createElement('div');
     work.className = 'msg advisor';
     work.innerHTML = `<div class="meta">Advisor · thinking…</div><div class="bubble"><p>Working…</p></div>`;
@@ -696,8 +786,7 @@ WIDGET_HTML = """<!doctype html>
       const files = Array.from(elFile.files || []);
       const data  = files.length ? await callReview(q, files, currentChatId) : await callRag(q, currentChatId);
       if (data && data.chat_id) currentChatId = data.chat_id;
-      // refresh chat list to move this chat to top
-      loadChats();
+      loadChats(); // refresh list and highlight
 
       let html = (data && data.answer) ? data.answer : '';
       const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
@@ -738,8 +827,12 @@ WIDGET_HTML = """<!doctype html>
     }
   });
 
-  // Initial load
-  loadChats();
+  // Initial load (if user was remembered)
+  if (state.userId) {
+    loadChats();
+  } else {
+    elThread.innerHTML = '<div class="msg advisor"><div class="meta">Advisor ·</div><div class="bubble"><p>Welcome. Enter your Client ID on the left and click “Save” to begin.</p></div></div>';
+  }
 </script>
 </body>
 </html>
@@ -878,7 +971,7 @@ def review_endpoint(
                     texts.append("\n".join(pages))
                 except Exception as e:
                     raise HTTPException(status_code=415, detail=f"Failed to parse PDF: {f.filename} ({e})")
-            elif name.endswith(".txt"):
+            elif name endswith(".txt"):
                 try: texts.append(raw.decode("utf-8", errors="ignore"))
                 except Exception: texts.append(raw.decode("latin-1", errors="ignore"))
             elif name.endswith(".docx"):
