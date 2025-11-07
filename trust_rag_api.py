@@ -207,9 +207,11 @@ WIDGET_HTML = """<!doctype html>
 
   .bubble h1,.bubble h2,.bubble h3{margin:.6em 0 .4em}
   .bubble p{margin:.6em 0}
-  .bubble ul{margin:.4em 0 .6em 1.2em}
+  .bubble ul, .bubble ol{margin:.4em 0 .6em 1.4em}
+  .bubble a{color:#000;text-decoration:underline}
   .bubble code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono","Roboto Mono","Oxygen Mono","Ubuntu Mono","Courier New",monospace;background:#fff;border:1px solid var(--border);padding:.1em .3em;border-radius:6px;color:#000}
   .bubble pre{background:#fff;color:#000;border:1px solid var(--border);padding:12px;border-radius:12px;overflow:auto}
+  .bubble blockquote{border-left:3px solid #000;padding:6px 12px;margin:8px 0;background:#fafafa}
 
   .composer{position:fixed;bottom:0;left:0;right:0;background:#fff;padding:18px 12px;border-top:1px solid var(--border)}
   .composer .inner{max-width:900px;margin:0 auto}
@@ -217,11 +219,12 @@ WIDGET_HTML = """<!doctype html>
   .input{flex:1;min-height:24px;max-height:160px;overflow:auto;outline:none;padding:8px 10px;font:16px/1.5 var(--font);color:#000}
   .input:empty:before{content:attr(data-placeholder);color:#000}
   .send{padding:8px 14px;border-radius:12px;background:#000;color:#fff;border:1px solid #000;cursor:pointer}
+  .attach{padding:8px 12px;border-radius:12px;background:#fff;color:#000;border:1px solid var(--border);cursor:pointer}
 
   a{color:#000;text-decoration:underline}
   a:hover{text-decoration:none}
 
-  #file{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(1px,1px,1px,1px)}
+  #file{display:none}
 </style>
 </head>
 <body>
@@ -241,9 +244,10 @@ WIDGET_HTML = """<!doctype html>
       <div class="bar">
         <input id="file" type="file" multiple accept=".pdf,.txt,.docx" />
         <div id="input" class="input" role="textbox" aria-multiline="true" contenteditable="true" data-placeholder="Message the Advisor… (Shift+Enter for newline)"></div>
+        <button id="attach" class="attach" title="Add files">+</button>
         <button id="send" class="send" title="Send">Send</button>
       </div>
-      <div style="margin-top:8px;color:#000;font-size:12px;">
+      <div id="filehint" style="margin-top:8px;color:#000;font-size:12px;">
         State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.
       </div>
     </div>
@@ -254,7 +258,9 @@ WIDGET_HTML = """<!doctype html>
   const elThread = document.getElementById('thread');
   const elInput  = document.getElementById('input');
   const elSend   = document.getElementById('send');
+  const elAttach = document.getElementById('attach');
   const elFile   = document.getElementById('file');
+  const elHint   = document.getElementById('filehint');
 
   let lastQuestion = "";
 
@@ -269,23 +275,59 @@ WIDGET_HTML = """<!doctype html>
     elThread.scrollTop = elThread.scrollHeight;
   }
 
-  // Minimal MD -> HTML (ensures bold/italic render as <strong>/<em>)
+  // Markdown -> HTML with full formatting (bold, italic, links, blockquotes, code, lists).
   function mdToHtml(md){
     if(!md) return '';
+    // If already HTML-ish, trust it so <strong>/<em>/<a> from the model are preserved.
     if (/<\\w+[^>]*>/.test(md)) return md;
-    let h = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    h = h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+
+    let h = md;
+
+    // Escape basic HTML first to avoid injection, we'll selectively re-add tags via replacements
+    h = h.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+    // Code blocks ``` ```
+    h = h.replace(/```([\\s\\S]*?)```/g, (_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+
+    // Inline code `code`
+    h = h.replace(/`([^`]+?)`/g, '<code>$1</code>');
+
+    // Headings
     h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>')
          .replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>')
          .replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
-    h = h.replace(/^---$/gm,'<hr>');
+
+    // Blockquotes
+    h = h.replace(/^>\\s?(.*)$/gm, '<blockquote>$1</blockquote>');
+
+    // Bold / italic
     h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>')
          .replace(/__(.+?)__/g,'<strong>$1</strong>')
-         .replace(/\\*(.+?)\\*/g,'<em>$1</em>')
-         .replace(/_(.+?)_/g,'<em>$1</em>');
-    h = h.replace(/(?:^|\\n)[*-]\\s+(.*)/g,(m,i)=>`<li>${i}</li>`)
-         .replace(/(<li>.*<\\/li>)(\\n?)+/gs,m=>`<ul>${m}</ul>`);
-    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<pre|<hr|<p|<blockquote)(.+)$/gm,'<p>$1</p>');
+         .replace(/\\*(?!\\s)(.+?)\\*/g,'<em>$1</em>')
+         .replace(/_(?!\\s)(.+?)_/g,'<em>$1</em>');
+
+    // Links: [text](url)
+    h = h.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+    // Autolink bare URLs
+    h = h.replace(/(^|\\s)(https?:\\/\\/[^\\s<]+)(?=\\s|$)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+
+    // Ordered lists
+    // Convert lines starting with "1. " etc to <ol><li>..</li></ol>
+    h = h.replace(/(?:^|\\n)(\\d+)\\.\\s+(.+)(?:(?=\\n\\d+\\.\\s)|$)/gms, (m)=>{
+      const items = m.trim().split(/\\n(?=\\d+\\.\\s)/).map(it=>it.replace(/^\\d+\\.\\s+/, '')).map(t=>`<li>${t}</li>`).join('');
+      return `<ol>${items}</ol>`;
+    });
+
+    // Unordered lists
+    h = h.replace(/(?:^|\\n)[*-]\\s+(.+)(?:(?=\\n[*-]\\s)|$)/gms, (m)=>{
+      const items = m.trim().split(/\\n(?=[*-]\\s)/).map(it=>it.replace(/^[*-]\\s+/, '')).map(t=>`<li>${t}</li>`).join('');
+      return `<ul>${items}</ul>`;
+    });
+
+    // Paragraphs (add <p> around loose lines)
+    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
+
     return h;
   }
 
@@ -355,6 +397,18 @@ WIDGET_HTML = """<!doctype html>
     if (!q) return;
     elInput.innerHTML = '';
     handleSend(q);
+  });
+
+  // "+" attach button opens file dialog; show selected file count
+  elAttach.addEventListener('click', ()=>{
+    elFile.click();
+  });
+  elFile.addEventListener('change', ()=>{
+    if (elFile.files && elFile.files.length){
+      elHint.textContent = `${elFile.files.length} file${elFile.files.length>1?'s':''} selected.`;
+    }else{
+      elHint.textContent = 'State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.';
+    }
   });
 </script>
 </body>
