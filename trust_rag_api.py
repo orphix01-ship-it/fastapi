@@ -216,8 +216,8 @@ WIDGET_HTML = """<!doctype html>
   .bar{display:flex;align-items:flex-end;gap:8px;background:#fff;border:1px solid var(--ring);border-radius:22px;padding:8px;box-shadow:var(--shadow)}
   .input{flex:1;min-height:24px;max-height:160px;overflow:auto;outline:none;padding:8px 10px;font:16px/1.5 var(--font);color:#000}
   .input:empty:before{content:attr(data-placeholder);color:#000}
-  .btn{cursor:pointer}
 
+  .btn{cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:manipulation}
   .send{padding:8px 12px;border-radius:12px;background:#000;color:#fff;border:1px solid #000}
   .attach{padding:8px 10px;border-radius:12px;background:#fff;color:#000;border:1px solid var(--border)}
 
@@ -244,8 +244,8 @@ WIDGET_HTML = """<!doctype html>
       <div class="bar">
         <input id="file" type="file" multiple accept=".pdf,.txt,.docx" />
         <div id="input" class="input" role="textbox" aria-multiline="true" contenteditable="true" data-placeholder="Message the Advisor… (Shift+Enter for newline)"></div>
-        <button id="btnAttach" class="attach btn" type="button" title="Add files">+</button>
-        <button id="btnSend" class="send btn" type="button" title="Send" aria-label="Send">
+        <button id="attachBtn" class="attach btn" type="button" title="Add files" aria-label="Add files">+</button>
+        <button id="sendBtn" class="send btn" type="button" title="Send" aria-label="Send">
           <!-- paper-plane icon -->
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="m5 12 14-7-4 14-3-5-7-2z" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
@@ -263,17 +263,25 @@ WIDGET_HTML = """<!doctype html>
 (() => {
   'use strict';
 
-  // Wait for DOM to ensure elements exist before binding
+  // Ensure handlers attach AFTER DOM is ready
   window.addEventListener('DOMContentLoaded', () => {
-    const elThread = document.getElementById('thread');
-    const elInput  = document.getElementById('input');
-    const elBtnSend   = document.getElementById('btnSend');
-    const elBtnAttach = document.getElementById('btnAttach');
-    const elFile   = document.getElementById('file');
-    const elHint   = document.getElementById('filehint');
+    const $ = (id) => document.getElementById(id);
+
+    const elThread = $('thread');
+    const elInput  = $('input');
+    const elSend   = $('sendBtn');
+    const elAttach = $('attachBtn');
+    const elFile   = $('file');
+    const elHint   = $('filehint');
+
+    // Guard: if any critical element missing, log and abort to avoid silent failure
+    if (!elThread || !elInput || !elSend || !elAttach) {
+      console.error('Widget init error: element missing', {elThread, elInput, elSend, elAttach});
+      return;
+    }
 
     let lastQuestion = "";
-    let sending = false; // prevent double submits
+    let sending = false; // block double-submits
 
     function now(){ return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) }
 
@@ -403,7 +411,8 @@ WIDGET_HTML = """<!doctype html>
     async function handleSend(q){
       if(!q || sending) return;
       sending = true;
-      elBtnSend.setAttribute('disabled','disabled');
+      elSend.setAttribute('disabled','disabled');
+
       addMessage('user', q.replace(/\n/g,'<br>'));
       lastQuestion = q;
 
@@ -419,11 +428,12 @@ WIDGET_HTML = """<!doctype html>
         work.querySelector('.meta').textContent = 'Advisor · ' + now();
         work.querySelector('.bubble').outerHTML = `<div class="bubble">${rendered}</div>`;
       }catch(e){
+        console.error('send error', e);
         work.querySelector('.meta').textContent = 'Advisor · error';
         work.querySelector('.bubble').innerHTML = '<p style="color:#b91c1c">Error: '+(e && e.message ? e.message : String(e))+'</p>';
       } finally {
         sending = false;
-        elBtnSend.removeAttribute('disabled');
+        elSend.removeAttribute('disabled');
       }
     }
 
@@ -438,20 +448,44 @@ WIDGET_HTML = """<!doctype html>
       }
     });
 
-    // Click handlers
-    elBtnSend.addEventListener('click', ()=>{
+    // Primary click handlers
+    elSend.addEventListener('click', ()=>{
       const q = readInput();
       if (!q) return;
       elInput.innerHTML = '';
       handleSend(q);
     });
+    elSend.addEventListener('pointerup', (e)=>{
+      if (e.pointerType === 'touch') {
+        const q = readInput();
+        if (!q) return;
+        elInput.innerHTML = '';
+        handleSend(q);
+      }
+    });
 
-    elBtnAttach.addEventListener('click', ()=> elFile.click());
+    elAttach.addEventListener('click', ()=> elFile.click());
+    elAttach.addEventListener('pointerup', (e)=>{ if (e.pointerType === 'touch') elFile.click(); });
+
     elFile.addEventListener('change', ()=>{
       if (elFile.files && elFile.files.length){
         elHint.textContent = `${elFile.files.length} file${elFile.files.length>1?'s':''} selected.`;
       }else{
         elHint.textContent = 'State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.';
+      }
+    });
+
+    // Event delegation (belt-and-suspenders): if IDs ever change, still handle clicks
+    document.addEventListener('click', (ev)=>{
+      const t = ev.target.closest('button');
+      if (!t) return;
+      if (t.id === 'sendBtn') {
+        const q = readInput();
+        if (!q) return;
+        elInput.innerHTML = '';
+        handleSend(q);
+      } else if (t.id === 'attachBtn') {
+        elFile.click();
       }
     });
   });
