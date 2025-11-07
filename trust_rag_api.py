@@ -165,7 +165,7 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
     except Exception as e:
         return f"<p><em>(Synthesis unavailable: {e})</em></p>"
 
-# ========== WIDGET HTML ==========
+# ========== WIDGET (no avatars, no initial advisor bubble, user light-blue, advisor unboxed) ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -210,12 +210,13 @@ WIDGET_HTML = """<!doctype html>
   .bubble pre{background:#fff;color:#000;border:1px solid var(--border);padding:12px;border-radius:12px;overflow:auto}
   .bubble blockquote{border-left:3px solid #000;padding:6px 12px;margin:8px 0;background:#fafafa}
 
-  .composer{position:fixed;bottom:0;left:0;right:0;background:#fff;padding:18px 12px;border-top:none}
+  .composer{position:fixed;bottom:0;left:0;right:0;background:#fff;padding:18px 12px; /* no divider */ border-top:none}
   .composer .inner{max-width:900px;margin:0 auto}
   .bar{display:flex;align-items:flex-end;gap:8px;background:#fff;border:1px solid var(--ring);border-radius:22px;padding:8px;box-shadow:var(--shadow)}
   .input{flex:1;min-height:24px;max-height:160px;overflow:auto;outline:none;padding:8px 10px;font:16px/1.5 var(--font);color:#000}
   .input:empty:before{content:attr(data-placeholder);color:#000}
   .btn{cursor:pointer}
+
   .send{padding:8px 12px;border-radius:12px;background:#000;color:#fff;border:1px solid #000}
   .attach{padding:8px 10px;border-radius:12px;background:#fff;color:#000;border:1px solid var(--border)}
 
@@ -244,6 +245,7 @@ WIDGET_HTML = """<!doctype html>
         <div id="input" class="input" role="textbox" aria-multiline="true" contenteditable="true" data-placeholder="Message the Advisor… (Shift+Enter for newline)"></div>
         <button id="attach" class="attach btn" type="button" title="Add files">+</button>
         <button id="send" class="send btn" type="button" title="Send" aria-label="Send">
+          <!-- paper-plane icon -->
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="m5 12 14-7-4 14-3-5-7-2z" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
@@ -277,15 +279,15 @@ WIDGET_HTML = """<!doctype html>
     elThread.scrollTop = elThread.scrollHeight;
   }
 
-  // Normalize trust/contract labels and bold titles to colon-style lines (no visible asterisks)
+  // Normalize common trust/contract bold templates into colon-style lines (no **asterisks** visuals)
   function normalizeTrustDoc(html){
     let out = html;
 
-    // Convert all-caps bold title paragraph to heading + blank line
+    // Convert all-caps bold title line to heading + blank line
     out = out.replace(/<p>\s*<strong>\s*([A-Z0-9][A-Z0-9\s\-&,.'()]+?)\s*<\/strong>\s*<\/p>/g,
                       '<h2>$1</h2><p></p>');
 
-    // Map common bold labels to colon form
+    // Map bold labels to "Label: " (no bold)
     const labelMap = [
       {re:/<strong>\s*TRUST\s*NAME\s*:\s*<\/strong>/gi, rep:'Trust: '},
       {re:/<strong>\s*DATE\s*:\s*<\/strong>/gi, rep:'Date: '},
@@ -310,62 +312,12 @@ WIDGET_HTML = """<!doctype html>
 
   // Markdown -> HTML with full formatting (bold, italic, links, blockquotes, code, lists).
   function mdToHtml(md){
-    if(!md) return '';
-    if (/<\w+[^>]*>/.test(md)) return md; // already HTML-ish, keep tags
-
-    let h = md;
-
-    // Escape first
-    h = h.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-
-    // Code blocks
-    h = h.replace(/```([\s\S]*?)```/g, (_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
-    // Inline code
-    h = h.replace(/`([^`]+?)`/g, '<code>$1</code>');
-
-    // Headings
-    h = h.replace(/^######\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\s+(.*)$/gm,'<h5>$1</h5>')
-         .replace(/^####\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\s+(.*)$/gm,'<h3>$1</h3>')
-         .replace(/^##\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\s+(.*)$/gm,'<h1>$1</h1>');
-
-    // Blockquotes
-    h = h.replace(/^>\s?(.*)$/gm, '<blockquote>$1</blockquote>');
-
-    // Bold / italic (convert markdown to tags so no visible asterisks)
-    h = h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
-         .replace(/__(.+?)__/g,'<strong>$1</strong>')
-         .replace(/\*(?!\s)(.+?)\*/g,'<em>$1</em>')
-         .replace(/_(?!\s)(.+?)_/g,'<em>$1</em>');
-
-    // Links
-    h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-    // Autolink
-    h = h.replace(/(^|\s)(https?:\/\/[^\s<]+)(?=\s|$)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
-
-    // Ordered lists
-    h = h.replace(/(?:^|\n)(\d+)\.\s+(.+)(?:(?=\n\d+\.\s)|$)/gms, (m)=>{
-      const items = m.trim().split(/\n(?=\d+\.\s)/).map(it=>it.replace(/^\d+\.\s+/, '')).map(t=>`<li>${t}</li>`).join('');
-      return `<ol>${items}</ol>`;
-    });
-    // Unordered lists
-    h = h.replace(/(?:^|\n)[*-]\s+(.+)(?:(?=\n[*-]\s)|$)/gms, (m)=>{
-      const items = m.trim().split(/\n(?=[*-]\s)/).map(it=>it.replace(/^[*-]\s+/, '')).map(t=>`<li>${t}</li>`).join('');
-      return `<ul>${items}</ul>`;
-    });
-
-    // Paragraphs
-    h = h.replace(/\n{2,}/g,'</p><p>').replace(/^(?!<h\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
-
-    return h;
-  }
-
-  // Convert leftover **bold**/*italic* inside already-HTML answers (so no visible asterisks).
-  // Protects <code>, <pre>, and <a> blocks before converting.
+    // Convert leftover **bold**, *italic* that still appear in HTML.
   function applyInlineFormatting(html) {
     if (!html) return '';
     let out = String(html);
 
-    // Protect blocks
+    // Protect code and links so they’re not touched
     const slots = [];
     function protect(tag) {
       const re = new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi');
@@ -377,16 +329,65 @@ WIDGET_HTML = """<!doctype html>
     }
     protect('code'); protect('pre'); protect('a');
 
-    // Convert markdown-like inline formatting in remaining text
+    // Replace markdown bold/italic in remaining text
     out = out
       .replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>')
       .replace(/__([^_]+?)__/g, '<strong>$1</strong>')
       .replace(/(^|[^*])\*([^*\n]+?)\*/g, '$1<em>$2</em>')
       .replace(/(^|[^_])_([^_\n]+?)_/g, '$1<em>$2</em>');
 
-    // Restore protected regions
+    // Restore protected blocks
     for (const { key, val } of slots) out = out.replace(key, val);
     return out;
+  }
+    if(!md) return '';
+    // If already HTML-like, trust it so <strong>/<em>/<a> are preserved (prevents visible **asterisks**)
+    if (/<\\w+[^>]*>/.test(md)) return md;
+
+    let h = md;
+
+    // Escape first
+    h = h.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+    // Code blocks
+    h = h.replace(/```([\\s\\S]*?)```/g, (_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+    // Inline code
+    h = h.replace(/`([^`]+?)`/g, '<code>$1</code>');
+
+    // Headings
+    h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>')
+         .replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>')
+         .replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
+
+    // Blockquotes
+    h = h.replace(/^>\\s?(.*)$/gm, '<blockquote>$1</blockquote>');
+
+    // Bold / italic (turn **...** and *...* into <strong>/<em>)
+    h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>')
+         .replace(/__(.+?)__/g,'<strong>$1</strong>')
+         .replace(/\\*(?!\\s)(.+?)\\*/g,'<em>$1</em>')
+         .replace(/_(?!\\s)(.+?)_/g,'<em>$1</em>');
+
+    // Links
+    h = h.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // Autolink
+    h = h.replace(/(^|\\s)(https?:\\/\\/[^\\s<]+)(?=\\s|$)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+
+    // Ordered lists
+    h = h.replace(/(?:^|\\n)(\\d+)\\.\\s+(.+)(?:(?=\\n\\d+\\.\\s)|$)/gms, (m)=>{
+      const items = m.trim().split(/\\n(?=\\d+\\.\\s)/).map(it=>it.replace(/^\\d+\\.\\s+/, '')).map(t=>`<li>${t}</li>`).join('');
+      return `<ol>${items}</ol>`;
+    });
+    // Unordered lists
+    h = h.replace(/(?:^|\\n)[*-]\\s+(.+)(?:(?=\\n[*-]\\s)|$)/gms, (m)=>{
+      const items = m.trim().split(/\\n(?=[*-]\\s)/).map(it=>it.replace(/^[*-]\\s+/, '')).map(t=>`<li>${t}</li>`).join('');
+      return `<ul>${items}</ul>`;
+    });
+
+    // Paragraphs
+    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
+
+    return h;
   }
 
   // === API helpers ===
@@ -432,13 +433,13 @@ WIDGET_HTML = """<!doctype html>
       const data = files.length ? await callReview(q, files) : await callRag(q);
       let html = (data && data.answer) ? data.answer : '';
 
-      // Use HTML if provided; otherwise convert markdown
+      // If model already returned HTML, use it; otherwise convert markdown to HTML
       const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
-      let rendered = looksHtml ? html : mdToHtml(String(html||''));
+     let rendered = looksHtml ? html : mdToHtml(String(html||''));
+rendered = applyInlineFormatting(rendered);  // <-- converts any leftover ** or * to <strong>/<em>
+rendered = normalizeTrustDoc(rendered);      // keep normalization next
 
-      // Ensure no visible asterisks by upgrading inline **/*** even inside HTML
-      rendered = applyInlineFormatting(rendered);
-      // Normalize trust doc label style (Date:, Trust:, etc.)
+      // Normalize trust/contract label formatting to colon style, remove bold labels/asterisks artifacts
       rendered = normalizeTrustDoc(rendered);
 
       work.querySelector('.meta').textContent = 'Advisor · ' + now();
