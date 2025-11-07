@@ -24,12 +24,11 @@ os.environ.setdefault("NO_PROXY", "*")
 if os.getenv("OPENAI_BASE_URL", "").strip().lower() in ("", "none", "null"):
     os.environ.pop("OPENAI_BASE_URL", None)
 
-API_TOKEN         = os.getenv("API_TOKEN", "")              # optional bearer for /search, /rag & /review
-SYNTH_MODEL       = os.getenv("SYNTH_MODEL", "gpt-4o-mini") # your Custom GPT-compatible model id
+API_TOKEN         = os.getenv("API_TOKEN", "")      # optional bearer for /search, /rag & /review
+SYNTH_MODEL       = os.getenv("SYNTH_MODEL", "gpt-4o-mini")
 MAX_SNIPPETS      = int(os.getenv("MAX_SNIPPETS", "20"))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "24000"))
-UPLOAD_MAX_BYTES  = 12 * 1024 * 1024                        # 12 MB
-PASSTHRU_ONLY     = os.getenv("PASSTHRU_ONLY", "1").strip() # "1" = direct pass-through, "0" = legacy RAG synth
+UPLOAD_MAX_BYTES  = 12 * 1024 * 1024  # 12 MB
 
 app = FastAPI(title="Private Trust Fiduciary Advisor API")
 
@@ -69,10 +68,10 @@ def check_rate_limit():
     REQUESTS.append(now)
 
 # ========== CLIENTS ==========
-pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY",""))
+pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
 index_name = os.getenv("PINECONE_INDEX", "").strip()
 host       = os.getenv("PINECONE_HOST", "").strip()
-idx = pc.Index(host=host) if (pc and host) else (pc.Index(index_name) if pc and index_name else None)
+idx = pc.Index(host=host) if host else pc.Index(index_name)
 
 def _clean_openai_key(raw: str) -> str:
     s = (raw or "").strip()
@@ -87,7 +86,7 @@ _openai_key = _clean_openai_key(os.getenv("OPENAI_API_KEY", ""))
 openai_http = httpx.Client(timeout=120.0, trust_env=False)
 client      = OpenAI(api_key=_openai_key, http_client=openai_http)
 
-# ========== RAG HELPERS (used only if PASSTHRU_ONLY=0) ==========
+# ========== RAG HELPERS ==========
 def _extract_snippet(meta: dict) -> str:
     for k in ("text","chunk","content","body","passage"):
         v = meta.get(k)
@@ -110,7 +109,7 @@ def _dedup_and_rank_sources(matches, top_k: int):
     rank = {"L1":1,"L2":2,"L3":3,"L4":4,"L5":5}
     best = {}
     for m in (matches or []):
-        meta  = m.get("metadata", {}) if isinstance(m, dict) else (getattr(m, "metadata", {}) or {})
+        meta  = m.get("metadata", {}) if isinstance(m, dict) else getattr(m, "metadata", {}) or {}
         title = _clean_title(meta.get("title") or meta.get("doc_parent") or "Unknown")
         lvl   = (meta.get("doc_level") or meta.get("level") or "N/A").strip()
         page  = str(meta.get("page", "?"))
@@ -131,10 +130,11 @@ def _titles_only(uniq_sources: list[dict]) -> list[str]:
             seen.add(t); out.append(t)
     return out
 
+# ========== SYNTHESIS ==========
 def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]) -> str:
-    """Legacy RAG synthesis (only used if PASSTHRU_ONLY=0)."""
     if not snippets and not uniq_sources:
         return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
+
     buf, used, kept = [], 0, 0
     for s in snippets:
         s = s.strip()
@@ -145,6 +145,7 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
     context = "\n---\n".join(buf)
     titles = _titles_only(uniq_sources)
     titles_html = "<ul>" + "".join(f"<li>{t}</li>" for t in titles) + "</ul>" if titles else "<p></p>"
+
     user_msg = (
         f"<h2>Question</h2>\n<p>{question}</p>\n"
         f"<h3>Context</h3>\n<pre>{context}</pre>\n"
@@ -164,7 +165,7 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
     except Exception as e:
         return f"<p><em>(Synthesis unavailable: {e})</em></p>"
 
-# ========== WIDGET (strict pass-through render in PASSTHRU_ONLY=1) ==========
+# ========== WIDGET ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -265,9 +266,6 @@ WIDGET_HTML = """<!doctype html>
   const elFile   = document.getElementById('file');
   const elHint   = document.getElementById('filehint');
 
-  // Pass-through flag from server env (baked into HTML at render time)
-  const PASSTHRU_ONLY = true; // widget renders response EXACTLY as returned by backend
-
   let lastQuestion = "";
 
   function now(){ return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) }
@@ -281,15 +279,128 @@ WIDGET_HTML = """<!doctype html>
     elThread.scrollTop = elThread.scrollHeight;
   }
 
-  // --- API helpers ---
+  // Normalize common trust/contract bold templates into colon-style lines (no **asterisks** visuals)
+  function normalizeTrustDoc(html){
+    let out = html;
+
+    // Convert all-caps bold title line to heading + blank line
+    out = out.replace(/<p>\s*<strong>\s*([A-Z0-9][A-Z0-9\s\-&,.'()]+?)\s*<\/strong>\s*<\/p>/g,
+                      '<h2>$1</h2><p></p>');
+
+    // Map bold labels to "Label: " (no bold)
+    const labelMap = [
+      {re:/<strong>\s*TRUST\s*NAME\s*:\s*<\/strong>/gi, rep:'Trust: '},
+      {re:/<strong>\s*DATE\s*:\s*<\/strong>/gi, rep:'Date: '},
+      {re:/<strong>\s*TAX\s*YEAR\s*:\s*<\/strong>/gi, rep:'Tax Year: '},
+      {re:/<strong>\s*TRUSTEE\(S\)\s*:\s*<\/strong>/gi, rep:'Trustee(s): '},
+      {re:/<strong>\s*LOCATION\s*:\s*<\/strong>/gi, rep:'Location: '},
+    ];
+    labelMap.forEach(({re,rep})=>{ out = out.replace(re, rep); });
+
+    // Remove any remaining bold-wrapped labels like <strong>Label:</strong>
+    out = out.replace(/<strong>\s*([A-Za-z][A-Za-z()\s]+:)\s*<\/strong>\s*/g, '$1 ');
+
+    // Also convert markdown-style **LABEL:** if it slipped through
+    out = out.replace(/\*\*\s*TRUST\s*NAME\s*:\s*\*\*/gi, 'Trust: ')
+             .replace(/\*\*\s*DATE\s*:\s*\*\*/gi, 'Date: ')
+             .replace(/\*\*\s*TAX\s*YEAR\s*:\s*\*\*/gi, 'Tax Year: ')
+             .replace(/\*\*\s*TRUSTEE\(S\)\s*:\s*\*\*/gi, 'Trustee(s): ')
+             .replace(/\*\*\s*LOCATION\s*:\s*\*\*/gi, 'Location: ');
+
+    return out;
+  }
+
+  // Markdown -> HTML with full formatting (bold, italic, links, blockquotes, code, lists).
+  function mdToHtml(md){
+    if(!md) return '';
+    // If already HTML-like, trust it so <strong>/<em>/<a> are preserved
+    if (/<\\w+[^>]*>/.test(md)) return md;
+
+    let h = md;
+
+    // Escape first
+    h = h.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+    // Code blocks
+    h = h.replace(/```([\\s\\S]*?)```/g, (_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+    // Inline code
+    h = h.replace(/`([^`]+?)`/g, '<code>$1</code>');
+
+    // Headings
+    h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>')
+         .replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>')
+         .replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
+
+    // Blockquotes
+    h = h.replace(/^>\\s?(.*)$/gm, '<blockquote>$1</blockquote>');
+
+    // Bold / italic (turn **...** and *...* into <strong>/<em>)
+    h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>')
+         .replace(/__(.+?)__/g,'<strong>$1</strong>')
+         .replace(/\\*(?!\\s)(.+?)\\*/g,'<em>$1</em>')
+         .replace(/_(?!\\s)(.+?)_/g,'<em>$1</em>');
+
+    // Links
+    h = h.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // Autolink
+    h = h.replace(/(^|\\s)(https?:\\/\\/[^\\s<]+)(?=\\s|$)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+
+    // Ordered lists
+    h = h.replace(/(?:^|\\n)(\\d+)\\.\\s+(.+)(?:(?=\\n\\d+\\.\\s)|$)/gms, (m)=>{
+      const items = m.trim().split(/\\n(?=\\d+\\.\\s)/).map(it=>it.replace(/^\\d+\\.\\s+/, '')).map(t=>`<li>${t}</li>`).join('');
+      return `<ol>${items}</ol>`;
+    });
+    // Unordered lists
+    h = h.replace(/(?:^|\\n)[*-]\\s+(.+)(?:(?=\\n[*-]\\s)|$)/gms, (m)=>{
+      const items = m.trim().split(/\\n(?=[*-]\\s)/).map(it=>it.replace(/^[*-]\\s+/, '')).map(t=>`<li>${t}</li>`).join('');
+      return `<ul>${items}</ul>`;
+    });
+
+    // Paragraphs
+    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
+
+    return h;
+  }
+
+  // Convert leftover **bold**/*italic* that still appear inside HTML (runs after md/html detection)
+  function applyInlineFormatting(html) {
+    if (!html) return '';
+    let out = String(html);
+
+    // Protect <code>, <pre>, <a> blocks
+    const slots = [];
+    function protect(tag) {
+      const re = new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi');
+      out = out.replace(re, m => {
+        const key = `__SLOT_${tag.toUpperCase()}_${slots.length}__`;
+        slots.push({ key, val: m });
+        return key;
+      });
+    }
+    protect('code'); protect('pre'); protect('a');
+
+    // Replace markdown bold/italic in remaining text
+    out = out
+      .replace(/\\*\\*([^*]+?)\\*\\*/g, '<strong>$1</strong>')
+      .replace(/__([^_]+?)__/g, '<strong>$1</strong>')
+      .replace(/(^|[^*])\\*([^*\\n]+?)\\*/g, '$1<em>$2</em>')
+      .replace(/(^|[^_])_([^_\\n]+?)_/g, '$1<em>$2</em>');
+
+    // Restore protected blocks
+    for (const { key, val } of slots) out = out.replace(key, val);
+    return out;
+  }
+
+  // === API helpers ===
   async function callRag(q){
     const url=new URL('/rag', location.origin);
     url.searchParams.set('question', q);
-    url.searchParams.set('top_k','12'); // ignored in passthru
+    url.searchParams.set('top_k','12');
     const r = await fetch(url,{method:'GET'});
     if(!r.ok) throw new Error('RAG failed: '+r.status);
     return r.json();
   }
+
   async function callReview(q, files){
     const fd = new FormData();
     fd.append('question', q);
@@ -298,6 +409,7 @@ WIDGET_HTML = """<!doctype html>
     if(!r.ok) throw new Error('Review failed: '+r.status);
     return r.json();
   }
+
   function readInput(){
     const tmp = elInput.cloneNode(true);
     tmp.querySelectorAll('div').forEach(d=>{
@@ -320,9 +432,15 @@ WIDGET_HTML = """<!doctype html>
     try{
       const files = Array.from(elFile.files || []);
       const data = files.length ? await callReview(q, files) : await callRag(q);
+      let html = (data && data.answer) ? data.answer : '';
 
-      // STRICT PASS-THROUGH: do NOT transform. Assume Custom GPT returns HTML.
-      let rendered = (data && data.answer) ? data.answer : '';
+      // If model already returned HTML, use it; otherwise convert markdown to HTML
+      const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
+      let rendered = looksHtml ? html : mdToHtml(String(html||''));
+
+      // Convert any leftover **/*** to <strong>/<em>, then normalize trust doc labels
+      rendered = applyInlineFormatting(rendered);
+      rendered = normalizeTrustDoc(rendered);
 
       work.querySelector('.meta').textContent = 'Advisor · ' + now();
       work.querySelector('.bubble').outerHTML = `<div class="bubble">${rendered}</div>`;
@@ -342,12 +460,16 @@ WIDGET_HTML = """<!doctype html>
       handleSend(q);
     }
   });
+
+  // Click handlers
   elSend.addEventListener('click', ()=>{
     const q = readInput();
     if (!q) return;
     elInput.innerHTML = '';
     handleSend(q);
   });
+
+  // "+" attach button opens file dialog; show selected file count
   elAttach.addEventListener('click', ()=>{ elFile.click(); });
   elFile.addEventListener('change', ()=>{
     if (elFile.files && elFile.files.length){
@@ -378,19 +500,17 @@ def diag():
         "PINECONE_INDEX": index_name or None,
         "PINECONE_HOST": host or None,
         "NO_PROXY": os.getenv("NO_PROXY"),
-        "PASSTHRU_ONLY": PASSTHRU_ONLY,
     }
     try:
-        if pc:
-            lst = pc.list_indexes()
-            info["pinecone_ok"] = True
-            info["index_count"] = len(lst or [])
+        lst = pc.list_indexes()
+        info["pinecone_ok"] = True
+        info["index_count"] = len(lst or [])
     except Exception as e:
         info["pinecone_ok"] = False
         info["error"] = str(e)
     return info
 
-# ========== /search (kept for compatibility; not used in pass-through) ==========
+# ========== /search ==========
 @app.get("/search")
 def search_endpoint(
     question: str = Query(..., min_length=3),
@@ -400,13 +520,35 @@ def search_endpoint(
 ):
     require_auth(authorization)
     check_rate_limit()
-    # no-op in pass-through mode; return empty context list
-    return {"question": question, "titles": [], "matches": [], "t_ms": 0}
+    t0 = time.time()
+    try:
+        emb = client.embeddings.create(model="text-embedding-3-small", input=question).data[0].embedding
+        flt = {"doc_level": {"$eq": level}} if level else None
+        res = idx.query(vector=emb, top_k=max(top_k, 12), include_metadata=True, filter=flt)
+        matches = res["matches"] if isinstance(res, dict) else getattr(res, "matches", [])
+        uniq = _dedup_and_rank_sources(matches, top_k=top_k)
+
+        titles = _titles_only(uniq)
+        rows = []
+        for s in uniq:
+            meta = s["meta"] or {}
+            rows.append({
+                "title":   s["title"],
+                "level":   s["level"],
+                "page":    s["page"],
+                "version": s.get("version",""),
+                "score":   s["score"],
+                "snippet": _extract_snippet(meta) or ""
+            })
+        return {"question": question, "titles": titles, "matches": rows, "t_ms": int((time.time()-t0)*1000)}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ========== /rag ==========
 @app.get("/rag")
 def rag_endpoint(
-    question: str = Query(..., min_length=1),
+    question: str = Query(..., min_length=3),
     top_k: int = Query(12, ge=1, le=30),
     level: str | None = Query(None),
     authorization: str | None = Header(default=None),
@@ -415,28 +557,14 @@ def rag_endpoint(
     check_rate_limit()
     t0 = time.time()
     try:
-        if PASSTHRU_ONLY == "1":
-            # DIRECT pass-through: one user message, zero system prompts.
-            res = client.chat.completions.create(
-                model=SYNTH_MODEL,
-                temperature=0.15,
-                max_tokens=2200,
-                messages=[{"role": "user", "content": question}],
-            )
-            content = (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content
-            return {"answer": content, "t_ms": int((time.time() - t0) * 1000)}
-        else:
-            # Legacy RAG path
-            if not idx:
-                return {"answer": "<p>No index configured.</p>", "t_ms": int((time.time()-t0)*1000)}
-            emb = client.embeddings.create(model="text-embedding-3-small", input=question).data[0].embedding
-            flt = {"doc_level": {"$eq": level}} if level else None
-            resq = idx.query(vector=emb, top_k=max(top_k, 12), include_metadata=True, filter=flt)
-            matches = resq["matches"] if isinstance(resq, dict) else getattr(resq, "matches", [])
-            uniq = _dedup_and_rank_sources(matches, top_k=top_k)
-            snippets = [s for s in (_extract_snippet(u["meta"]) for u in uniq) if s]
-            html = synthesize_html(question, uniq, snippets)
-            return {"answer": html, "t_ms": int((time.time() - t0) * 1000)}
+        emb = client.embeddings.create(model="text-embedding-3-small", input=question).data[0].embedding
+        flt = {"doc_level": {"$eq": level}} if level else None
+        res = idx.query(vector=emb, top_k=max(top_k, 12), include_metadata=True, filter=flt)
+        matches = res["matches"] if isinstance(res, dict) else getattr(res, "matches", [])
+        uniq = _dedup_and_rank_sources(matches, top_k=top_k)
+        snippets = [s for s in (_extract_snippet(u["meta"]) for u in uniq) if s]
+        html = synthesize_html(question, uniq, snippets)
+        return {"answer": html, "t_ms": int((time.time() - t0) * 1000)}
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -452,60 +580,6 @@ def review_endpoint(
     check_rate_limit()
     t0 = time.time()
     try:
-        # In strict pass-through mode we cannot forward binary to Chat Completions API.
-        # We continue to provide the existing local parse+chunk review, but if you want
-        # true pass-through of files, switch to the Assistants API with vector store.
-        if PASSTHRU_ONLY == "1":
-            if not files:
-                # No files -> just pass question exactly like /rag
-                res = client.chat.completions.create(
-                    model=SYNTH_MODEL,
-                    temperature=0.15,
-                    max_tokens=2200,
-                    messages=[{"role": "user", "content": question or "Please analyze."}],
-                )
-                content = (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content
-                return {"answer": content, "t_ms": int((time.time() - t0) * 1000)}
-            # Minimal fallback: extract text locally and ask model with that text appended verbatim
-            texts = []
-            for f in files:
-                name = (f.filename or "").lower()
-                raw  = f.file.read(UPLOAD_MAX_BYTES + 1)
-                if len(raw) > UPLOAD_MAX_BYTES:
-                    raise HTTPException(status_code=413, detail=f"{f.filename} exceeds {UPLOAD_MAX_BYTES//1024//1024}MB limit.")
-                if name.endswith(".pdf"):
-                    import pypdf
-                    reader = pypdf.PdfReader(io.BytesIO(raw))
-                    pages = []
-                    for p in reader.pages:
-                        try: pages.append(p.extract_text() or "")
-                        except Exception: pages.append("")
-                    texts.append("\n".join(pages))
-                elif name.endswith(".txt"):
-                    try: texts.append(raw.decode("utf-8", errors="ignore"))
-                    except Exception: texts.append(raw.decode("latin-1", errors="ignore"))
-                elif name.endswith(".docx"):
-                    try:
-                        import docx
-                        doc = docx.Document(io.BytesIO(raw))
-                        paras = [p.text for p in doc.paragraphs if p.text]
-                        texts.append("\n".join(paras))
-                    except Exception as e:
-                        raise HTTPException(status_code=415, detail=f"Failed to parse DOCX: {f.filename} ({e})")
-                else:
-                    raise HTTPException(status_code=415, detail=f"Unsupported file type: {f.filename} (PDF/TXT/DOCX)")
-            merged = "\n---\n".join([t for t in texts if t.strip()])
-            user_content = (question or "Please analyze the attached materials.") + "\n\n" + merged
-            res = client.chat.completions.create(
-                model=SYNTH_MODEL,
-                temperature=0.15,
-                max_tokens=2200,
-                messages=[{"role": "user", "content": user_content}],
-            )
-            content = (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content
-            return {"answer": content, "t_ms": int((time.time() - t0) * 1000)}
-
-        # Legacy review path (PASSTHRU_ONLY=0)
         if not files:
             raise HTTPException(status_code=400, detail="No files uploaded.")
         texts = []
@@ -515,22 +589,32 @@ def review_endpoint(
             if len(raw) > UPLOAD_MAX_BYTES:
                 raise HTTPException(status_code=413, detail=f"{f.filename} exceeds {UPLOAD_MAX_BYTES//1024//1024}MB limit.")
             if name.endswith(".pdf"):
-                import pypdf
-                reader = pypdf.PdfReader(io.BytesIO(raw))
-                pages = []
-                for p in reader.pages:
-                    try: pages.append(p.extract_text() or "")
-                    except Exception: pages.append("")
-                texts.append("\n".join(pages))
+                try:
+                    import pypdf
+                    reader = pypdf.PdfReader(io.BytesIO(raw))
+                    pages = []
+                    for p in reader.pages:
+                        try: pages.append(p.extract_text() or "")
+                        except Exception: pages.append("")
+                    texts.append("\n".join(pages))
+                except Exception as e:
+                    raise HTTPException(status_code=415, detail=f"Failed to parse PDF: {f.filename} ({e})")
             elif name.endswith(".txt"):
                 try: texts.append(raw.decode("utf-8", errors="ignore"))
                 except Exception: texts.append(raw.decode("latin-1", errors="ignore"))
             elif name.endswith(".docx"):
                 try:
-                    import docx
-                    doc = docx.Document(io.BytesIO(raw))
-                    paras = [p.text for p in doc.paragraphs if p.text]
-                    texts.append("\n".join(paras))
+                    try:
+                        import docx
+                        doc = docx.Document(io.BytesIO(raw))
+                        paras = [p.text for p in doc.paragraphs if p.text]
+                        texts.append("\n".join(paras))
+                    except Exception:
+                        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                            xml = z.read("word/document.xml").decode("utf-8", errors="ignore")
+                            stripped = re.sub(r"<[^>]+>", " ", xml)
+                            stripped = re.sub(r"\s+", " ", stripped).strip()
+                            texts.append(stripped)
                 except Exception as e:
                     raise HTTPException(status_code=415, detail=f"Failed to parse DOCX: {f.filename} ({e})")
             else:
