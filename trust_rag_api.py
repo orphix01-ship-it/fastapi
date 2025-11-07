@@ -279,11 +279,35 @@ WIDGET_HTML = """<!doctype html>
     elThread.scrollTop = elThread.scrollHeight;
   }
 
+  // --- Helpers to protect code blocks while we do markdown replacements on mixed content ---
+  function protectBlocks(html){
+    const buckets = [];
+    let i = 0;
+
+    // Protect <pre>...</pre>
+    html = html.replace(/<pre[\s\S]*?<\/pre>/gi, m=>{
+      const key = `__BLOCK_PRE_${i++}__`;
+      buckets.push([key, m]);
+      return key;
+    });
+    // Protect <code>...</code> (inline code in HTML answers)
+    html = html.replace(/<code[\s\S]*?<\/code>/gi, m=>{
+      const key = `__BLOCK_CODE_${i++}__`;
+      buckets.push([key, m]);
+      return key;
+    });
+    return { html, buckets };
+  }
+  function restoreBlocks(html, buckets){
+    for (const [key, val] of buckets) html = html.replaceAll(key, val);
+    return html;
+  }
+
   // Normalize common trust/contract bold templates into colon-style lines (no **asterisks** visuals)
   function normalizeTrustDoc(html){
     let out = html;
 
-    // Convert all-caps bold title line to heading + blank line
+    // Convert all-caps bold title line to heading + blank line (e.g., <p><strong>TRUSTEE RESOLUTION...</strong></p>)
     out = out.replace(/<p>\s*<strong>\s*([A-Z0-9][A-Z0-9\s\-&,.'()]+?)\s*<\/strong>\s*<\/p>/g,
                       '<h2>$1</h2><p></p>');
 
@@ -310,56 +334,86 @@ WIDGET_HTML = """<!doctype html>
     return out;
   }
 
-  // Markdown -> HTML with full formatting (bold, italic, links, blockquotes, code, lists).
+  // Markdown -> HTML (for pure Markdown replies)
   function mdToHtml(md){
     if(!md) return '';
-    // If already HTML-like, trust it so <strong>/<em>/<a> are preserved (prevents visible **asterisks**)
-    if (/<\\w+[^>]*>/.test(md)) return md;
+    // If looks like HTML already, return as-is (we'll post-process for **bold** elsewhere)
+    if (/<\w+[^>]*>/.test(md)) return md;
 
     let h = md;
 
-    // Escape first
+    // Escape then add tags
     h = h.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
-    // Code blocks
-    h = h.replace(/```([\\s\\S]*?)```/g, (_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
-    // Inline code
+    // ```code```
+    h = h.replace(/```([\s\S]*?)```/g, (_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+    // `inline`
     h = h.replace(/`([^`]+?)`/g, '<code>$1</code>');
 
     // Headings
-    h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>')
-         .replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>')
-         .replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
+    h = h.replace(/^######\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\s+(.*)$/gm,'<h5>$1</h5>')
+         .replace(/^####\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\s+(.*)$/gm,'<h3>$1</h3>')
+         .replace(/^##\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\s+(.*)$/gm,'<h1>$1</h1>');
 
-    // Blockquotes
-    h = h.replace(/^>\\s?(.*)$/gm, '<blockquote>$1</blockquote>');
+    // Blockquote
+    h = h.replace(/^>\s?(.*)$/gm, '<blockquote>$1</blockquote>');
 
-    // Bold / italic (turn **...** and *...* into <strong>/<em>)
-    h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>')
+    // Bold/italic
+    h = h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
          .replace(/__(.+?)__/g,'<strong>$1</strong>')
-         .replace(/\\*(?!\\s)(.+?)\\*/g,'<em>$1</em>')
-         .replace(/_(?!\\s)(.+?)_/g,'<em>$1</em>');
+         .replace(/\*(?!\s)(.+?)\*/g,'<em>$1</em>')
+         .replace(/_(?!\s)(.+?)_/g,'<em>$1</em>');
 
     // Links
-    h = h.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-    // Autolink
-    h = h.replace(/(^|\\s)(https?:\\/\\/[^\\s<]+)(?=\\s|$)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    h = h.replace(/(^|\s)(https?:\/\/[^\s<]+)(?=\s|$)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
 
     // Ordered lists
-    h = h.replace(/(?:^|\\n)(\\d+)\\.\\s+(.+)(?:(?=\\n\\d+\\.\\s)|$)/gms, (m)=>{
-      const items = m.trim().split(/\\n(?=\\d+\\.\\s)/).map(it=>it.replace(/^\\d+\\.\\s+/, '')).map(t=>`<li>${t}</li>`).join('');
+    h = h.replace(/(?:^|\n)(\d+)\.\s+(.+)(?:(?=\n\d+\.\s)|$)/gms, (m)=>{
+      const items = m.trim().split(/\n(?=\d+\.\s)/).map(it=>it.replace(/^\d+\.\s+/, '')).map(t=>`<li>${t}</li>`).join('');
       return `<ol>${items}</ol>`;
     });
     // Unordered lists
-    h = h.replace(/(?:^|\\n)[*-]\\s+(.+)(?:(?=\\n[*-]\\s)|$)/gms, (m)=>{
-      const items = m.trim().split(/\\n(?=[*-]\\s)/).map(it=>it.replace(/^[*-]\\s+/, '')).map(t=>`<li>${t}</li>`).join('');
+    h = h.replace(/(?:^|\n)[*-]\s+(.+)(?:(?=\n[*-]\s)|$)/gms, (m)=>{
+      const items = m.trim().split(/\n(?=[*-]\s)/).map(it=>it.replace(/^[*-]\s+/, '')).map(t=>`<li>${t}</li>`).join('');
       return `<ul>${items}</ul>`;
     });
 
     // Paragraphs
-    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
+    h = h.replace(/\n{2,}/g,'</p><p>').replace(/^(?!<h\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
 
     return h;
+  }
+
+  // NEW: robust renderer for HTML-or-Markdown (handles mixed content so **bold** never leaks)
+  function renderAnswer(s){
+    if (!s) return '';
+    let out = String(s);
+
+    // Case A: pure Markdown (no tags)
+    if (!/<\w+[^>]*>/.test(out)) {
+      out = mdToHtml(out);
+    } else {
+      // Case B: HTML or mixed. Convert Markdown markers that slipped through,
+      // but DO NOT touch code blocks.
+      const saved = protectBlocks(out);
+      out = saved.html;
+
+      // Convert markdown-style bold/italic inside mixed HTML
+      out = out.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+               .replace(/__(.+?)__/g,'<strong>$1</strong>')
+               .replace(/\*(?!\s)(.+?)\*/g,'<em>$1</em>')
+               .replace(/_(?!\s)(.+?)_/g,'<em>$1</em>');
+
+      // Convert markdown links [text](url) that appear in text nodes
+      out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+      out = restoreBlocks(out, saved.buckets);
+    }
+
+    // Enforce your trust/contract label style
+    out = normalizeTrustDoc(out);
+    return out;
   }
 
   // === API helpers ===
@@ -384,15 +438,15 @@ WIDGET_HTML = """<!doctype html>
   function readInput(){
     const tmp = elInput.cloneNode(true);
     tmp.querySelectorAll('div').forEach(d=>{
-      if (d.innerHTML === "<br>") d.innerHTML = "\\n";
+      if (d.innerHTML === "<br>") d.innerHTML = "\n";
     });
-    const text = tmp.innerText.replace(/\\u00A0/g,' ').trim();
+    const text = tmp.innerText.replace(/\u00A0/g,' ').trim();
     return text;
   }
 
   async function handleSend(q){
     if(!q) return;
-    addMessage('user', q.replace(/\\n/g,'<br>'));
+    addMessage('user', q.replace(/\n/g,'<br>'));
     lastQuestion = q;
 
     const work = document.createElement('div');
@@ -404,14 +458,7 @@ WIDGET_HTML = """<!doctype html>
       const files = Array.from(elFile.files || []);
       const data = files.length ? await callReview(q, files) : await callRag(q);
       let html = (data && data.answer) ? data.answer : '';
-
-      // If model already returned HTML, use it; otherwise convert markdown to HTML
-      const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
-      let rendered = looksHtml ? html : mdToHtml(String(html||''));
-
-      // Normalize trust/contract label formatting to colon style, remove bold labels/asterisks artifacts
-      rendered = normalizeTrustDoc(rendered);
-
+      const rendered = renderAnswer(html);
       work.querySelector('.meta').textContent = 'Advisor · ' + now();
       work.querySelector('.bubble').outerHTML = `<div class="bubble">${rendered}</div>`;
     }catch(e){
@@ -431,7 +478,7 @@ WIDGET_HTML = """<!doctype html>
     }
   });
 
-  // Click handlers (explicit type="button" so no form submit interference)
+  // Buttons (explicit type="button" so no form submit interference)
   elSend.addEventListener('click', ()=>{
     const q = readInput();
     if (!q) return;
@@ -440,9 +487,7 @@ WIDGET_HTML = """<!doctype html>
   });
 
   // "+" attach button opens file dialog; show selected file count
-  elAttach.addEventListener('click', ()=>{
-    elFile.click();
-  });
+  elAttach.addEventListener('click', ()=> elFile.click());
   elFile.addEventListener('change', ()=>{
     if (elFile.files && elFile.files.length){
       elHint.textContent = `${elFile.files.length} file${elFile.files.length>1?'s':''} selected.`;
