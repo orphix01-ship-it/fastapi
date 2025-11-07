@@ -132,33 +132,60 @@ def _titles_only(uniq_sources: list[dict]) -> list[str]:
 
 # ========== SYNTHESIS ==========
 def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]) -> str:
+    """
+    Synthesizes a clean HTML answer using a system message that enforces:
+    - HTML-only output (no markdown asterisks)
+    - Proper tags for bold/italic/headings/lists/links
+    """
     if not snippets and not uniq_sources:
         return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
 
+    # Build large context block (snippets joined by ---)
     buf, used, kept = [], 0, 0
     for s in snippets:
         s = s.strip()
-        if not s: continue
-        if used + len(s) > MAX_CONTEXT_CHARS: break
+        if not s:
+            continue
+        if used + len(s) > MAX_CONTEXT_CHARS:
+            break
         buf.append(s); used += len(s); kept += 1
-        if kept >= MAX_SNIPPETS: break
+        if kept >= MAX_SNIPPETS:
+            break
     context = "\n---\n".join(buf)
+
+    # titles only (deduped, precedence applied)
     titles = _titles_only(uniq_sources)
     titles_html = "<ul>" + "".join(f"<li>{t}</li>" for t in titles) + "</ul>" if titles else "<p></p>"
 
+    # Single user message: question + raw context + citation titles
     user_msg = (
         f"<h2>Question</h2>\n<p>{question}</p>\n"
         f"<h3>Context</h3>\n<pre>{context}</pre>\n"
         f"<h3>Citations</h3>\n{titles_html}"
     )
+
+    # 🔹 NEW: System message with your additional instructions
+    system_msg = (
+        "Always respond using clean, valid HTML (no markdown asterisks). "
+        "Render bold with <strong>, italics with <em>, headings with <h1>-<h6>, "
+        "lists with <ul>/<ol>, code with <pre><code>, and links with <a>. "
+        "Do not include backticks or markdown symbols in the final output. "
+    )
+
     try:
         res = client.chat.completions.create(
-            model=SYNTH_MODEL, temperature=0.15, max_tokens=2200,
-            messages=[{"role": "user", "content": user_msg}],
+            model=SYNTH_MODEL,
+            temperature=0.15,
+            max_tokens=2200,
+            messages=[
+                {"role": "system", "content": system_msg},   # ← additional instructions live here
+                {"role": "user", "content": user_msg},
+            ],
         )
         html = (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content.strip()
         if not html:
             return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
+        # Guard: if model returns plain text, minimally wrap to HTML
         if "<" not in html:
             html = "<div><p>" + html.replace("\n", "<br>") + "</p></div>"
         return html
