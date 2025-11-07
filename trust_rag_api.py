@@ -2,40 +2,64 @@
 from fastapi import FastAPI, Query, Header, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from pinecone import Pinecone
 from openai import OpenAI
-import httpx, io, os, time, traceback
+import httpx, zipfile, io, re, os, time, traceback
 from collections import deque
 
-# ======== BASIC SETUP ========
+# ========== ENV / SETUP ==========
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except Exception:
     pass
 
-for k in (
-    "HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy",
-    "OPENAI_PROXY","OPENAI_HTTP_PROXY","OPENAI_HTTPS_PROXY"
-):
-    os.environ.pop(k, None)
+# remove proxies so SDK never injects `proxies=` automatically
+for _k in ("HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy",
+           "OPENAI_PROXY","OPENAI_HTTP_PROXY","OPENAI_HTTPS_PROXY"):
+    os.environ.pop(_k, None)
 os.environ.setdefault("NO_PROXY", "*")
 
-API_TOKEN   = os.getenv("API_TOKEN", "")
-MODEL       = os.getenv("SYNTH_MODEL", "gpt-4o-mini")
+# ignore broken custom base url
+if os.getenv("OPENAI_BASE_URL", "").strip().lower() in ("", "none", "null"):
+    os.environ.pop("OPENAI_BASE_URL", None)
+
+API_TOKEN         = os.getenv("API_TOKEN", "")              # optional bearer for /search, /rag & /review
+SYNTH_MODEL       = os.getenv("SYNTH_MODEL", "gpt-4o-mini") # your Custom GPT-compatible model id
+MAX_SNIPPETS      = int(os.getenv("MAX_SNIPPETS", "20"))
+MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "24000"))
+UPLOAD_MAX_BYTES  = 12 * 1024 * 1024                        # 12 MB
+PASSTHRU_ONLY     = os.getenv("PASSTHRU_ONLY", "1").strip() # "1" = direct pass-through, "0" = legacy RAG synth
 
 app = FastAPI(title="Private Trust Fiduciary Advisor API")
 
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# Rate limit
+# optional metrics
+try:
+    from prometheus_fastapi_instrumentator import Instrumentator
+    Instrumentator().instrument(app).expose(app, endpoint="/metrics")
+except Exception:
+    pass
+
+# ========== AUTH / RATE LIMIT ==========
+def require_auth(auth_header: str | None):
+    if not API_TOKEN:
+        return
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    token = auth_header.split(" ", 1)[1].strip()
+    if token != API_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
 REQUESTS = deque(maxlen=120)
 RATE_WINDOW = 10
 RATE_LIMIT  = 100
+
 def check_rate_limit():
     now = time.time()
     while REQUESTS and now - REQUESTS[0] > RATE_WINDOW:
@@ -44,167 +68,478 @@ def check_rate_limit():
         raise HTTPException(status_code=429, detail="Too Many Requests")
     REQUESTS.append(now)
 
-# OpenAI client
-openai_http = httpx.Client(timeout=120.0, trust_env=False)
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), http_client=openai_http)
+# ========== CLIENTS ==========
+pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY",""))
+index_name = os.getenv("PINECONE_INDEX", "").strip()
+host       = os.getenv("PINECONE_HOST", "").strip()
+idx = pc.Index(host=host) if (pc and host) else (pc.Index(index_name) if pc and index_name else None)
 
-# ======== MINIMAL FRONTEND ========
+def _clean_openai_key(raw: str) -> str:
+    s = (raw or "").strip()
+    if not s.startswith("sk-"):
+        parts = [t.strip() for t in s.replace("=", " ").split() if t.strip().startswith("sk-")]
+        if parts: s = parts[-1]
+    if not s.startswith("sk-"):
+        raise RuntimeError("OPENAI_API_KEY appears malformed.")
+    return s
+
+_openai_key = _clean_openai_key(os.getenv("OPENAI_API_KEY", ""))
+openai_http = httpx.Client(timeout=120.0, trust_env=False)
+client      = OpenAI(api_key=_openai_key, http_client=openai_http)
+
+# ========== RAG HELPERS (used only if PASSTHRU_ONLY=0) ==========
+def _extract_snippet(meta: dict) -> str:
+    for k in ("text","chunk","content","body","passage"):
+        v = meta.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+def _clean_title(title: str) -> str:
+    t = (title or "Unknown")
+    t = re.sub(r'^[Ll]\d[_\-:\s]+', '', t)
+    t = re.sub(r'(?i)\bocr\b', '', t)
+    t = re.sub(r'[0-9a-f]{8,}', '', t)
+    if " -- " in t:
+        first, *_ = t.split(" -- ")
+        if len(first) >= 6:
+            t = first
+    return re.sub(r"\s+", " ", t.replace("_", " ")).strip(" -–—")
+
+def _dedup_and_rank_sources(matches, top_k: int):
+    rank = {"L1":1,"L2":2,"L3":3,"L4":4,"L5":5}
+    best = {}
+    for m in (matches or []):
+        meta  = m.get("metadata", {}) if isinstance(m, dict) else (getattr(m, "metadata", {}) or {})
+        title = _clean_title(meta.get("title") or meta.get("doc_parent") or "Unknown")
+        lvl   = (meta.get("doc_level") or meta.get("level") or "N/A").strip()
+        page  = str(meta.get("page", "?"))
+        ver   = str(meta.get("version", meta.get("v", ""))) if meta.get("version", meta.get("v", "")) else ""
+        score = float(m.get("score") if isinstance(m, dict) else getattr(m, "score", 0.0))
+        key   = (title, lvl, page, ver)
+        if key not in best or score > best[key]["score"]:
+            best[key] = {"title": title, "level": lvl, "page": page, "version": ver, "score": score, "meta": meta}
+    uniq = list(best.values())
+    uniq.sort(key=lambda s: (rank.get(s["level"], 99), -s["score"]))
+    return uniq[:top_k]
+
+def _titles_only(uniq_sources: list[dict]) -> list[str]:
+    seen, out = set(), []
+    for s in uniq_sources:
+        t = s["title"]
+        if t not in seen:
+            seen.add(t); out.append(t)
+    return out
+
+def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]) -> str:
+    """Legacy RAG synthesis (only used if PASSTHRU_ONLY=0)."""
+    if not snippets and not uniq_sources:
+        return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
+    buf, used, kept = [], 0, 0
+    for s in snippets:
+        s = s.strip()
+        if not s: continue
+        if used + len(s) > MAX_CONTEXT_CHARS: break
+        buf.append(s); used += len(s); kept += 1
+        if kept >= MAX_SNIPPETS: break
+    context = "\n---\n".join(buf)
+    titles = _titles_only(uniq_sources)
+    titles_html = "<ul>" + "".join(f"<li>{t}</li>" for t in titles) + "</ul>" if titles else "<p></p>"
+    user_msg = (
+        f"<h2>Question</h2>\n<p>{question}</p>\n"
+        f"<h3>Context</h3>\n<pre>{context}</pre>\n"
+        f"<h3>Citations</h3>\n{titles_html}"
+    )
+    try:
+        res = client.chat.completions.create(
+            model=SYNTH_MODEL, temperature=0.15, max_tokens=2200,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        html = (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content.strip()
+        if not html:
+            return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
+        if "<" not in html:
+            html = "<div><p>" + html.replace("\n", "<br>") + "</p></div>"
+        return html
+    except Exception as e:
+        return f"<p><em>(Synthesis unavailable: {e})</em></p>"
+
+# ========== WIDGET (strict pass-through render in PASSTHRU_ONLY=1) ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Private Trust Fiduciary Advisor</title>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
-:root{
-  --bg:#fff; --text:#000; --border:#e5e5e5; --ring:#d9d9d9;
-  --user:#e8f1ff; --shadow:0 1px 2px rgba(0,0,0,.03),0 8px 24px rgba(0,0,0,.04);
-  --font:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial;
-  --title:"Cinzel",serif;
-}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--font)}
-.app{display:flex;flex-direction:column;height:100vh;width:100%}
-.header{background:#fff}
-.header .inner{max-width:900px;margin:0 auto;padding:14px 16px;text-align:center}
-.title{font-family:var(--title);font-weight:300;letter-spacing:.2px;font-size:20px}
-.main{flex:1;overflow:auto;padding:24px 12px 140px}
-.container{max-width:900px;margin:0 auto}
-.thread{display:flex;flex-direction:column;gap:16px}
-.msg .bubble{display:inline-block;max-width:80%}
-.msg.user .bubble{
-  background:var(--user);border:1px solid var(--border);
-  border-radius:14px;padding:12px 14px;box-shadow:var(--shadow);
-}
-.msg.advisor .bubble{background:transparent;padding:0;max-width:100%}
-.meta{font-size:12px;margin-bottom:6px;color:#000}
-.composer{position:fixed;bottom:0;left:0;right:0;background:#fff;padding:18px 12px;border-top:none}
-.composer .inner{max-width:900px;margin:0 auto}
-.bar{display:flex;align-items:flex-end;gap:8px;background:#fff;
-  border:1px solid var(--ring);border-radius:22px;padding:8px;box-shadow:var(--shadow)}
-.input{flex:1;min-height:24px;max-height:160px;overflow:auto;outline:none;
-  padding:8px 10px;font:16px/1.5 var(--font);color:#000}
-.input:empty:before{content:attr(data-placeholder);color:#000}
-.btn{cursor:pointer}
-.send{padding:8px 12px;border-radius:12px;background:#000;color:#fff;border:1px solid #000}
-.attach{padding:8px 10px;border-radius:12px;background:#fff;color:#000;border:1px solid var(--border)}
-#file{display:none}
+  :root{
+    --bg:#ffffff; --text:#000000; --border:#e5e5e5; --ring:#d9d9d9;
+    --user:#e8f1ff;
+    --shadow:0 1px 2px rgba(0,0,0,.03), 0 8px 24px rgba(0,0,0,.04);
+    --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial;
+    --title:"Cinzel",serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--font)}
+  .app{display:flex;flex-direction:column;height:100vh;width:100%}
+  .header{background:#fff}
+  .header .inner{max-width:900px;margin:0 auto;padding:14px 16px;text-align:center}
+  .title{font-family:var(--title);font-weight:300;letter-spacing:.2px;color:#000;font-size:20px}
+
+  .main{flex:1;overflow:auto;padding:24px 12px 140px}
+  .container{max-width:900px;margin:0 auto}
+  .thread{display:flex;flex-direction:column;gap:16px}
+
+  .msg{padding:0;border:0;background:transparent}
+  .msg .bubble{display:inline-block;max-width:80%}
+  .msg.user .bubble{
+    background:var(--user); border:1px solid var(--border);
+    border-radius:14px; padding:12px 14px; box-shadow:var(--shadow);
+  }
+  .msg.advisor .bubble{background:transparent; padding:0; max-width:100%}
+  .meta{font-size:12px;margin-bottom:6px;color:#000}
+
+  .bubble h1,.bubble h2,.bubble h3{margin:.6em 0 .4em}
+  .bubble p{margin:.6em 0}
+  .bubble ul, .bubble ol{margin:.4em 0 .6em 1.4em}
+  .bubble a{color:#000;text-decoration:underline}
+  .bubble strong{font-weight:700}
+  .bubble em{font-style:italic}
+  .bubble code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono","Roboto Mono","Oxygen Mono","Ubuntu Mono","Courier New",monospace;background:#fff;border:1px solid var(--border);padding:.1em .3em;border-radius:6px;color:#000}
+  .bubble pre{background:#fff;color:#000;border:1px solid var(--border);padding:12px;border-radius:12px;overflow:auto}
+  .bubble blockquote{border-left:3px solid #000;padding:6px 12px;margin:8px 0;background:#fafafa}
+
+  /* Composer with NO top divider line */
+  .composer{position:fixed;bottom:0;left:0;right:0;background:#fff;padding:18px 12px;border-top:none}
+  .composer .inner{max-width:900px;margin:0 auto}
+  .bar{display:flex;align-items:flex-end;gap:8px;background:#fff;border:1px solid var(--ring);border-radius:22px;padding:8px;box-shadow:var(--shadow)}
+  .input{flex:1;min-height:24px;max-height:160px;overflow:auto;outline:none;padding:8px 10px;font:16px/1.5 var(--font);color:#000}
+  .input:empty:before{content:attr(data-placeholder);color:#000}
+  .btn{cursor:pointer}
+  .send{padding:8px 12px;border-radius:12px;background:#000;color:#fff;border:1px solid #000}
+  .attach{padding:8px 10px;border-radius:12px;background:#fff;color:#000;border:1px solid var(--border)}
+
+  a{color:#000;text-decoration:underline}
+  a:hover{text-decoration:none}
+
+  #file{display:none}
 </style>
 </head>
 <body>
 <div class="app">
-  <div class="header"><div class="inner"><div class="title">Private Trust Fiduciary Advisor</div></div></div>
-  <main class="main"><div class="container"><div id="thread" class="thread"></div></div></main>
+  <div class="header">
+    <div class="inner"><div class="title">Private Trust Fiduciary Advisor</div></div>
+  </div>
+
+  <main class="main">
+    <div class="container">
+      <div id="thread" class="thread"></div>
+    </div>
+  </main>
+
   <div class="composer">
     <div class="inner">
       <div class="bar">
-        <input id="file" type="file" multiple accept=".pdf,.txt,.docx"/>
-        <div id="input" class="input" role="textbox" aria-multiline="true"
-             contenteditable="true" data-placeholder="Message the Advisor… (Shift+Enter for newline)"></div>
+        <input id="file" type="file" multiple accept=".pdf,.txt,.docx" />
+        <div id="input" class="input" role="textbox" aria-multiline="true" contenteditable="true" data-placeholder="Message the Advisor… (Shift+Enter for newline)"></div>
         <button id="attach" class="attach btn" type="button" title="Add files">+</button>
-        <button id="send" class="send btn" type="button" title="Send">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <path d="m5 12 14-7-4 14-3-5-7-2z" stroke="#fff"
-                  stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <button id="send" class="send btn" type="button" title="Send" aria-label="Send">
+          <!-- paper-plane icon -->
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="m5 12 14-7-4 14-3-5-7-2z" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
       </div>
-      <div id="hint" style="margin-top:8px;color:#000;font-size:12px;">
-        State your inquiry to receive a response.
+      <div id="filehint" style="margin-top:8px;color:#000;font-size:12px;">
+        State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.
       </div>
     </div>
   </div>
 </div>
+
 <script>
-const thread=document.getElementById('thread');
-const input=document.getElementById('input');
-const send=document.getElementById('send');
-const attach=document.getElementById('attach');
-const file=document.getElementById('file');
-const hint=document.getElementById('hint');
-function now(){return new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});}
-function add(role,html){
-  const d=document.createElement('div');
-  d.className='msg '+(role==='user'?'user':'advisor');
-  d.innerHTML=`<div class="meta">${role==='user'?'You':'Advisor'} · ${now()}</div><div class="bubble">${html}</div>`;
-  thread.appendChild(d); thread.scrollTop=thread.scrollHeight;
-}
-async function ask(q){
-  if(!q)return;
-  add('user',q.replace(/\\n/g,'<br>'));
-  const work=document.createElement('div');
-  work.className='msg advisor';
-  work.innerHTML='<div class="meta">Advisor · thinking…</div><div class="bubble"><p>Working…</p></div>';
-  thread.appendChild(work); thread.scrollTop=thread.scrollHeight;
-  try{
-    const files=Array.from(file.files||[]);
-    const fd=new FormData();
-    fd.append('question',q);
-    for(const f of files) fd.append('files',f);
-    const r=await fetch('/direct',{method:'POST',body:fd});
-    const data=await r.json();
-    work.querySelector('.meta').textContent='Advisor · '+now();
-    work.querySelector('.bubble').innerHTML=data.answer||'(no response)';
-  }catch(e){
-    work.querySelector('.meta').textContent='Advisor · error';
-    work.querySelector('.bubble').innerHTML='<p style="color:red">'+e+'</p>';
+  const elThread = document.getElementById('thread');
+  const elInput  = document.getElementById('input');
+  const elSend   = document.getElementById('send');
+  const elAttach = document.getElementById('attach');
+  const elFile   = document.getElementById('file');
+  const elHint   = document.getElementById('filehint');
+
+  // Pass-through flag from server env (baked into HTML at render time)
+  const PASSTHRU_ONLY = true; // widget renders response EXACTLY as returned by backend
+
+  let lastQuestion = "";
+
+  function now(){ return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) }
+
+  function addMessage(role, html){
+    const wrap = document.createElement('div');
+    wrap.className = 'msg ' + (role === 'user' ? 'user' : 'advisor');
+    const meta = `<div class="meta">${role==='user'?'You':'Advisor'} · ${now()}</div>`;
+    wrap.innerHTML = meta + `<div class="bubble">${html}</div>`;
+    elThread.appendChild(wrap);
+    elThread.scrollTop = elThread.scrollHeight;
   }
-}
-input.addEventListener('keydown',ev=>{
-  if(ev.key==='Enter'&&!ev.shiftKey){
-    ev.preventDefault();
-    const q=input.innerText.trim(); if(!q)return;
-    input.innerText=''; ask(q);
+
+  // --- API helpers ---
+  async function callRag(q){
+    const url=new URL('/rag', location.origin);
+    url.searchParams.set('question', q);
+    url.searchParams.set('top_k','12'); // ignored in passthru
+    const r = await fetch(url,{method:'GET'});
+    if(!r.ok) throw new Error('RAG failed: '+r.status);
+    return r.json();
   }
-});
-send.addEventListener('click',()=>{
-  const q=input.innerText.trim(); if(!q)return;
-  input.innerText=''; ask(q);
-});
-attach.addEventListener('click',()=>file.click());
-file.addEventListener('change',()=>{
-  hint.textContent=file.files.length?`${file.files.length} file(s) ready.`:'State your inquiry to receive a response.';
-});
+  async function callReview(q, files){
+    const fd = new FormData();
+    fd.append('question', q);
+    for(const f of files) fd.append('files', f);
+    const r = await fetch('/review',{method:'POST', body:fd});
+    if(!r.ok) throw new Error('Review failed: '+r.status);
+    return r.json();
+  }
+  function readInput(){
+    const tmp = elInput.cloneNode(true);
+    tmp.querySelectorAll('div').forEach(d=>{
+      if (d.innerHTML === "<br>") d.innerHTML = "\\n";
+    });
+    const text = tmp.innerText.replace(/\\u00A0/g,' ').trim();
+    return text;
+  }
+
+  async function handleSend(q){
+    if(!q) return;
+    addMessage('user', q.replace(/\\n/g,'<br>'));
+    lastQuestion = q;
+
+    const work = document.createElement('div');
+    work.className = 'msg advisor';
+    work.innerHTML = `<div class="meta">Advisor · thinking…</div><div class="bubble"><p>Working…</p></div>`;
+    elThread.appendChild(work); elThread.scrollTop = elThread.scrollHeight;
+
+    try{
+      const files = Array.from(elFile.files || []);
+      const data = files.length ? await callReview(q, files) : await callRag(q);
+
+      // STRICT PASS-THROUGH: do NOT transform. Assume Custom GPT returns HTML.
+      let rendered = (data && data.answer) ? data.answer : '';
+
+      work.querySelector('.meta').textContent = 'Advisor · ' + now();
+      work.querySelector('.bubble').outerHTML = `<div class="bubble">${rendered}</div>`;
+    }catch(e){
+      work.querySelector('.meta').textContent = 'Advisor · error';
+      work.querySelector('.bubble').innerHTML = '<p style="color:#b91c1c">Error: '+(e && e.message ? e.message : String(e))+'</p>';
+    }
+  }
+
+  // Send on Enter; Shift+Enter inserts newline
+  elInput.addEventListener('keydown', (ev)=>{
+    if (ev.key === 'Enter' && !ev.shiftKey){
+      ev.preventDefault();
+      const q = readInput();
+      if (!q) return;
+      elInput.innerHTML = '';
+      handleSend(q);
+    }
+  });
+  elSend.addEventListener('click', ()=>{
+    const q = readInput();
+    if (!q) return;
+    elInput.innerHTML = '';
+    handleSend(q);
+  });
+  elAttach.addEventListener('click', ()=>{ elFile.click(); });
+  elFile.addEventListener('change', ()=>{
+    if (elFile.files && elFile.files.length){
+      elHint.textContent = `${elFile.files.length} file${elFile.files.length>1?'s':''} selected.`;
+    }else{
+      elHint.textContent = 'State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.';
+    }
+  });
 </script>
-</body></html>
+</body>
+</html>
 """
 
 @app.get("/widget", response_class=HTMLResponse)
 def widget():
     return HTMLResponse(WIDGET_HTML)
 
-# ======== DIRECT PASSTHROUGH ========
-@app.post("/direct")
-def direct_endpoint(
-    question: str = Form(...),
-    files: list[UploadFile] = File(default=[]),
-):
-    """Pure passthrough: sends user question and optional files straight to GPT."""
-    check_rate_limit()
+# ========== Health / Diag ==========
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.get("/diag")
+def diag():
+    info = {
+        "has_PINECONE_API_KEY": bool(os.getenv("PINECONE_API_KEY")),
+        "has_OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
+        "PINECONE_INDEX": index_name or None,
+        "PINECONE_HOST": host or None,
+        "NO_PROXY": os.getenv("NO_PROXY"),
+        "PASSTHRU_ONLY": PASSTHRU_ONLY,
+    }
     try:
-        # Merge file text if any
-        attachments=[]
-        for f in files:
-            try:
-                text=f.file.read().decode("utf-8","ignore")
-            except Exception:
-                text=""
-            if text:
-                attachments.append(f"\n\n[File: {f.filename}]\n{text}")
-        full_prompt = question + "".join(attachments)
-        res = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role":"user","content":full_prompt}],
-            max_tokens=2500,
-        )
-        reply = res.choices[0].message.content.strip()
-        return {"answer": reply}
+        if pc:
+            lst = pc.list_indexes()
+            info["pinecone_ok"] = True
+            info["index_count"] = len(lst or [])
+    except Exception as e:
+        info["pinecone_ok"] = False
+        info["error"] = str(e)
+    return info
+
+# ========== /search (kept for compatibility; not used in pass-through) ==========
+@app.get("/search")
+def search_endpoint(
+    question: str = Query(..., min_length=3),
+    top_k: int = Query(12, ge=1, le=30),
+    level: str | None = Query(None),
+    authorization: str | None = Header(default=None),
+):
+    require_auth(authorization)
+    check_rate_limit()
+    # no-op in pass-through mode; return empty context list
+    return {"question": question, "titles": [], "matches": [], "t_ms": 0}
+
+# ========== /rag ==========
+@app.get("/rag")
+def rag_endpoint(
+    question: str = Query(..., min_length=1),
+    top_k: int = Query(12, ge=1, le=30),
+    level: str | None = Query(None),
+    authorization: str | None = Header(default=None),
+):
+    require_auth(authorization)
+    check_rate_limit()
+    t0 = time.time()
+    try:
+        if PASSTHRU_ONLY == "1":
+            # DIRECT pass-through: one user message, zero system prompts.
+            res = client.chat.completions.create(
+                model=SYNTH_MODEL,
+                temperature=0.15,
+                max_tokens=2200,
+                messages=[{"role": "user", "content": question}],
+            )
+            content = (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content
+            return {"answer": content, "t_ms": int((time.time() - t0) * 1000)}
+        else:
+            # Legacy RAG path
+            if not idx:
+                return {"answer": "<p>No index configured.</p>", "t_ms": int((time.time()-t0)*1000)}
+            emb = client.embeddings.create(model="text-embedding-3-small", input=question).data[0].embedding
+            flt = {"doc_level": {"$eq": level}} if level else None
+            resq = idx.query(vector=emb, top_k=max(top_k, 12), include_metadata=True, filter=flt)
+            matches = resq["matches"] if isinstance(resq, dict) else getattr(resq, "matches", [])
+            uniq = _dedup_and_rank_sources(matches, top_k=top_k)
+            snippets = [s for s in (_extract_snippet(u["meta"]) for u in uniq) if s]
+            html = synthesize_html(question, uniq, snippets)
+            return {"answer": html, "t_ms": int((time.time() - t0) * 1000)}
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-# ======== HEALTH ========
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+# ========== /review ==========
+@app.post("/review")
+def review_endpoint(
+    authorization: str | None = Header(default=None),
+    question: str = Form(""),
+    files: list[UploadFile] = File(default=[]),
+):
+    require_auth(authorization)
+    check_rate_limit()
+    t0 = time.time()
+    try:
+        # In strict pass-through mode we cannot forward binary to Chat Completions API.
+        # We continue to provide the existing local parse+chunk review, but if you want
+        # true pass-through of files, switch to the Assistants API with vector store.
+        if PASSTHRU_ONLY == "1":
+            if not files:
+                # No files -> just pass question exactly like /rag
+                res = client.chat.completions.create(
+                    model=SYNTH_MODEL,
+                    temperature=0.15,
+                    max_tokens=2200,
+                    messages=[{"role": "user", "content": question or "Please analyze."}],
+                )
+                content = (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content
+                return {"answer": content, "t_ms": int((time.time() - t0) * 1000)}
+            # Minimal fallback: extract text locally and ask model with that text appended verbatim
+            texts = []
+            for f in files:
+                name = (f.filename or "").lower()
+                raw  = f.file.read(UPLOAD_MAX_BYTES + 1)
+                if len(raw) > UPLOAD_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail=f"{f.filename} exceeds {UPLOAD_MAX_BYTES//1024//1024}MB limit.")
+                if name.endswith(".pdf"):
+                    import pypdf
+                    reader = pypdf.PdfReader(io.BytesIO(raw))
+                    pages = []
+                    for p in reader.pages:
+                        try: pages.append(p.extract_text() or "")
+                        except Exception: pages.append("")
+                    texts.append("\n".join(pages))
+                elif name.endswith(".txt"):
+                    try: texts.append(raw.decode("utf-8", errors="ignore"))
+                    except Exception: texts.append(raw.decode("latin-1", errors="ignore"))
+                elif name.endswith(".docx"):
+                    try:
+                        import docx
+                        doc = docx.Document(io.BytesIO(raw))
+                        paras = [p.text for p in doc.paragraphs if p.text]
+                        texts.append("\n".join(paras))
+                    except Exception as e:
+                        raise HTTPException(status_code=415, detail=f"Failed to parse DOCX: {f.filename} ({e})")
+                else:
+                    raise HTTPException(status_code=415, detail=f"Unsupported file type: {f.filename} (PDF/TXT/DOCX)")
+            merged = "\n---\n".join([t for t in texts if t.strip()])
+            user_content = (question or "Please analyze the attached materials.") + "\n\n" + merged
+            res = client.chat.completions.create(
+                model=SYNTH_MODEL,
+                temperature=0.15,
+                max_tokens=2200,
+                messages=[{"role": "user", "content": user_content}],
+            )
+            content = (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content
+            return {"answer": content, "t_ms": int((time.time() - t0) * 1000)}
+
+        # Legacy review path (PASSTHRU_ONLY=0)
+        if not files:
+            raise HTTPException(status_code=400, detail="No files uploaded.")
+        texts = []
+        for f in files:
+            name = (f.filename or "").lower()
+            raw  = f.file.read(UPLOAD_MAX_BYTES + 1)
+            if len(raw) > UPLOAD_MAX_BYTES:
+                raise HTTPException(status_code=413, detail=f"{f.filename} exceeds {UPLOAD_MAX_BYTES//1024//1024}MB limit.")
+            if name.endswith(".pdf"):
+                import pypdf
+                reader = pypdf.PdfReader(io.BytesIO(raw))
+                pages = []
+                for p in reader.pages:
+                    try: pages.append(p.extract_text() or "")
+                    except Exception: pages.append("")
+                texts.append("\n".join(pages))
+            elif name.endswith(".txt"):
+                try: texts.append(raw.decode("utf-8", errors="ignore"))
+                except Exception: texts.append(raw.decode("latin-1", errors="ignore"))
+            elif name.endswith(".docx"):
+                try:
+                    import docx
+                    doc = docx.Document(io.BytesIO(raw))
+                    paras = [p.text for p in doc.paragraphs if p.text]
+                    texts.append("\n".join(paras))
+                except Exception as e:
+                    raise HTTPException(status_code=415, detail=f"Failed to parse DOCX: {f.filename} ({e})")
+            else:
+                raise HTTPException(status_code=415, detail=f"Unsupported file type: {f.filename} (only PDF/TXT/DOCX)")
+        merged = "\n---\n".join([t for t in texts if t.strip()])
+        chunks = [merged[i:i+2000] for i in range(0, len(merged), 2000)][:MAX_SNIPPETS]
+        pseudo = [{"title": "Uploaded Document", "level": "L5", "page": "?", "version": "", "score": 1.0, "meta": {}}]
+        html = synthesize_html(question or "Please analyze the attached materials.", pseudo, chunks)
+        return {"answer": html, "t_ms": int((time.time() - t0) * 1000)}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
