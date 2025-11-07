@@ -73,7 +73,7 @@ def check_rate_limit():
 # Simple user extractor: prefer X-User-Id (from your app auth), else "demo"
 def get_current_user(authorization: Optional[str] = Header(None),
                      x_user_id: Optional[str] = Header(None)) -> str:
-    # If you wire a real auth provider, validate here and return their subject (sub)
+    # Wire your real auth provider here if needed
     if x_user_id and x_user_id.strip():
         return x_user_id.strip()
     return "demo"  # safe fallback for development
@@ -133,7 +133,6 @@ def init_db():
     """)
     conn.commit()
     conn.close()
-
 init_db()
 
 def iso_now():
@@ -268,7 +267,6 @@ def ensure_chat(conn, user_id: str, chat_id: Optional[str]) -> str:
         row = cur.execute("SELECT id FROM chats WHERE id=? AND user_id=?", (chat_id, user_id)).fetchone()
         if row:
             return chat_id
-    # create
     new_id = str(uuid.uuid4())
     now = iso_now()
     cur.execute("INSERT INTO chats (id, user_id, title, archived, created_at, updated_at) VALUES (?,?,?,?,?,?)",
@@ -292,16 +290,18 @@ def insert_message(conn, chat_id: str, user_id: Optional[str], role: str,
 def create_chat(user_id: str = Depends(get_current_user)):
     conn = db()
     cid = ensure_chat(conn, user_id, None)
+    conn.close()
     return {"chat_id": cid, "title": "New chat"}
 
 @app.get("/chats")
-def list_chats(page: int = 1, size: int = 20, user_id: str = Depends(get_current_user)):
+def list_chats(page: int = 1, size: int = 30, user_id: str = Depends(get_current_user)):
     off = max((page-1),0)*size
     conn = db()
     cur = conn.cursor()
     rows = cur.execute("""SELECT id, title, archived, created_at, updated_at
                           FROM chats WHERE user_id=? ORDER BY updated_at DESC LIMIT ? OFFSET ?""",
                        (user_id, size, off)).fetchall()
+    conn.close()
     return {"items": [dict(r) for r in rows], "page": page, "size": size}
 
 @app.get("/chats/{chat_id}")
@@ -311,22 +311,26 @@ def get_chat(chat_id: str, user_id: str = Depends(get_current_user)):
     chat = cur.execute("SELECT id, title, archived, created_at, updated_at FROM chats WHERE id=? AND user_id=?",
                        (chat_id, user_id)).fetchone()
     if not chat:
+        conn.close()
         raise HTTPException(404, "Chat not found")
     msgs = cur.execute("""SELECT id, role, content_html, created_at
-                          FROM messages WHERE chat_id=? ORDER BY created_at ASC LIMIT 200""", (chat_id,)).fetchall()
+                          FROM messages WHERE chat_id=? ORDER BY created_at ASC LIMIT 500""", (chat_id,)).fetchall()
+    conn.close()
     return {"chat": dict(chat), "messages": [dict(m) for m in msgs]}
 
 @app.get("/chats/{chat_id}/messages")
-def list_messages(chat_id: str, page: int = 1, size: int = 50, user_id: str = Depends(get_current_user)):
+def list_messages(chat_id: str, page: int = 1, size: int = 100, user_id: str = Depends(get_current_user)):
     off = max((page-1),0)*size
     conn = db()
     cur = conn.cursor()
     ok = cur.execute("SELECT 1 FROM chats WHERE id=? AND user_id=?", (chat_id, user_id)).fetchone()
     if not ok:
+        conn.close()
         raise HTTPException(404, "Chat not found")
     msgs = cur.execute("""SELECT id, role, content_html, created_at
                           FROM messages WHERE chat_id=? ORDER BY created_at ASC LIMIT ? OFFSET ?""",
                        (chat_id, size, off)).fetchall()
+    conn.close()
     return {"messages": [dict(m) for m in msgs], "page": page, "size": size}
 
 @app.post("/chats/{chat_id}/title")
@@ -335,8 +339,10 @@ def rename_chat(chat_id: str, title: str = Form(...), user_id: str = Depends(get
     cur = conn.cursor()
     cur.execute("UPDATE chats SET title=?, updated_at=? WHERE id=? AND user_id=?", (title[:200], iso_now(), chat_id, user_id))
     if cur.rowcount == 0:
+        conn.close()
         raise HTTPException(404, "Chat not found")
     conn.commit()
+    conn.close()
     return {"ok": True}
 
 @app.post("/chats/{chat_id}/archive")
@@ -345,8 +351,10 @@ def archive_chat(chat_id: str, archived: int = Form(1), user_id: str = Depends(g
     cur = conn.cursor()
     cur.execute("UPDATE chats SET archived=?, updated_at=? WHERE id=? AND user_id=?", (1 if archived else 0, iso_now(), chat_id, user_id))
     if cur.rowcount == 0:
+        conn.close()
         raise HTTPException(404, "Chat not found")
     conn.commit()
+    conn.close()
     return {"ok": True}
 
 @app.delete("/chats/{chat_id}")
@@ -356,11 +364,13 @@ def delete_chat(chat_id: str, user_id: str = Depends(get_current_user)):
     cur.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
     cur.execute("DELETE FROM chats WHERE id=? AND user_id=?", (chat_id, user_id))
     if cur.rowcount == 0:
+        conn.close()
         raise HTTPException(404, "Chat not found or not yours")
     conn.commit()
+    conn.close()
     return {"ok": True}
 
-# ========== WIDGET (same UI; chat persistence handled server-side) ==========
+# ========== WIDGET (Sidebar with Profile + Chat Tabs) ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -368,122 +378,368 @@ WIDGET_HTML = """<!doctype html>
 <title>Private Trust Fiduciary Advisor</title>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
-  :root{--bg:#ffffff;--text:#000;--border:#e5e5e5;--ring:#d9d9d9;--user:#e8f1ff;--shadow:0 1px 2px rgba(0,0,0,.03),0 8px 24px rgba(0,0,0,.04);--font:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial;--title:"Cinzel",serif}
-  *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--font)}
-  .app{display:flex;flex-direction:column;height:100vh;width:100%}.header{background:#fff}
-  .header .inner{max-width:900px;margin:0 auto;padding:14px 16px;text-align:center}
-  .title{font-family:var(--title);font-weight:300;letter-spacing:.2px;color:#000;font-size:20px}
-  .main{flex:1;overflow:auto;padding:24px 12px 140px}.container{max-width:900px;margin:0 auto}
-  .thread{display:flex;flex-direction:column;gap:16px}.msg{padding:0;border:0;background:transparent}
-  .msg .bubble{display:inline-block;max-width:80%}.msg.user .bubble{background:var(--user);border:1px solid var(--border);border-radius:14px;padding:12px 14px;box-shadow:var(--shadow)}
-  .msg.advisor .bubble{background:transparent;padding:0;max-width:100%}.meta{font-size:12px;margin-bottom:6px;color:#000}
-  .bubble h1,.bubble h2,.bubble h3{margin:.6em 0 .4em}.bubble p{margin:.6em 0}
-  .bubble ul,.bubble ol{margin:.4em 0 .6em 1.4em}.bubble a{color:#000;text-decoration:underline}
-  .bubble strong{font-weight:700}.bubble em{font-style:italic}.bubble code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono","Roboto Mono","Oxygen Mono","Ubuntu Mono","Courier New",monospace;background:#fff;border:1px solid var(--border);padding:.1em .3em;border-radius:6px;color:#000}
+  :root{
+    --bg:#fff; --text:#000; --border:#e5e5e5; --ring:#d9d9d9; --user:#e8f1ff;
+    --shadow:0 1px 2px rgba(0,0,0,.03), 0 8px 24px rgba(0,0,0,.04);
+    --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial;
+    --title:"Cinzel",serif;
+    --rail: #fafafa;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--font)}
+
+  .app{display:grid; grid-template-columns: 280px 1fr; height:100vh; width:100%}
+  .rail{
+    border-right:1px solid var(--border); background:var(--rail); display:flex; flex-direction:column; min-width:0;
+  }
+  .brand{padding:14px 16px; text-align:center; border-bottom:1px solid var(--border)}
+  .brand .title{font-family:var(--title); font-weight:300; font-size:18px}
+  .section{padding:12px 12px; border-bottom:1px solid var(--border)}
+  .label{font-size:12px; color:#6b7280; margin-bottom:6px}
+  .row{display:flex; gap:6px}
+  .input{flex:1; border:1px solid var(--border); border-radius:10px; padding:6px 8px; background:#fff; color:#000}
+  .btn{cursor:pointer; border:1px solid var(--border); background:#fff; color:#000; padding:6px 10px; border-radius:10px}
+  .btn.primary{background:#000; color:#fff; border-color:#000}
+  .chats{flex:1; overflow:auto; padding:8px}
+  .chatitem{border:1px solid var(--border); background:#fff; padding:8px 10px; border-radius:10px; margin-bottom:8px; cursor:pointer}
+  .chatitem.active{outline:2px solid #000}
+  .chatmeta{font-size:12px; color:#6b7280; margin-top:2px}
+
+  .main{display:flex; flex-direction:column; min-width:0}
+  .header{background:#fff; padding:12px 16px; border-bottom:1px solid var(--border)}
+  .header .title{font-family:var(--title); font-weight:300; font-size:20px; text-align:center}
+
+  .content{flex:1; overflow:auto; padding:24px 12px 140px}
+  .container{max-width:900px; margin:0 auto}
+  .thread{display:flex; flex-direction:column; gap:16px}
+  .msg{padding:0; border:0; background:transparent}
+  .msg .bubble{display:inline-block; max-width:80%}
+  .msg.user .bubble{background:var(--user); border:1px solid var(--border); border-radius:14px; padding:12px 14px; box-shadow:var(--shadow)}
+  .msg.advisor .bubble{background:transparent; padding:0; max-width:100%}
+  .meta{font-size:12px; margin-bottom:6px; color:#000}
+
+  .bubble h1,.bubble h2,.bubble h3{margin:.6em 0 .4em}
+  .bubble p{margin:.6em 0}
+  .bubble ul, .bubble ol{margin:.4em 0 .6em 1.4em}
+  .bubble a{color:#000; text-decoration:underline}
+  .bubble strong{font-weight:700}
+  .bubble em{font-style:italic}
+  .bubble code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono","Roboto Mono","Oxygen Mono","Ubuntu Mono","Courier New",monospace;background:#fff;border:1px solid var(--border);padding:.1em .3em;border-radius:6px;color:#000}
   .bubble pre{background:#fff;color:#000;border:1px solid var(--border);padding:12px;border-radius:12px;overflow:auto}
   .bubble blockquote{border-left:3px solid #000;padding:6px 12px;margin:8px 0;background:#fafafa}
-  .composer{position:fixed;bottom:0;left:0;right:0;background:#fff;padding:18px 12px;border-top:none}
-  .composer .inner{max-width:900px;margin:0 auto}.bar{display:flex;align-items:flex-end;gap:8px;background:#fff;border:1px solid var(--ring);border-radius:22px;padding:8px;box-shadow:var(--shadow)}
-  .input{flex:1;min-height:24px;max-height:160px;overflow:auto;outline:none;padding:8px 10px;font:16px/1.5 var(--font);color:#000}
-  .input:empty:before{content:attr(data-placeholder);color:#000}.btn{cursor:pointer}
-  .send{padding:8px 12px;border-radius:12px;background:#000;color:#fff;border:1px solid #000}
-  .attach{padding:8px 10px;border-radius:12px;background:#fff;color:#000;border:1px solid var(--border)}
+
+  /* Composer: NO page-wide divider */
+  .composer{position:fixed; left:280px; right:0; bottom:0; background:#fff; padding:18px 12px; border-top:none}
+  .bar{display:flex; align-items:flex-end; gap:8px; background:#fff; border:1px solid var(--ring); border-radius:22px; padding:8px; box-shadow:var(--shadow); max-width:900px; margin:0 auto}
+  .cin{flex:1; min-height:24px; max-height:160px; overflow:auto; outline:none; padding:8px 10px; font:16px/1.5 var(--font); color:#000}
+  .cin:empty:before{content:attr(data-placeholder); color:#000}
+  .iconbtn{cursor:pointer; border:1px solid var(--border); background:#fff; color:#000; padding:8px 10px; border-radius:12px}
+  .send{border:1px solid #000; background:#000; color:#fff; border-radius:12px; padding:8px 12px}
   #file{display:none}
 </style>
 </head>
 <body>
-<div class="app">
-  <div class="header"><div class="inner"><div class="title">Private Trust Fiduciary Advisor</div></div></div>
-  <main class="main"><div class="container"><div id="thread" class="thread"></div></div></main>
-  <div class="composer">
-    <div class="inner">
-      <div class="bar">
-        <input id="file" type="file" multiple accept=".pdf,.txt,.docx"/>
-        <div id="input" class="input" role="textbox" aria-multiline="true" contenteditable="true" data-placeholder="Message the Advisor… (Shift+Enter for newline)"></div>
-        <button id="attach" class="attach btn" type="button" title="Add files">+</button>
-        <button id="send" class="send btn" type="button" title="Send" aria-label="Send">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12 14-7-4 14-3-5-7-2z" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
+  <div class="app">
+    <!-- Left rail -->
+    <aside class="rail">
+      <div class="brand"><div class="title">Private Trust Fiduciary Advisor</div></div>
+
+      <div class="section">
+        <div class="label">Profile</div>
+        <div class="row" style="margin-bottom:6px">
+          <input id="pf-id" class="input" placeholder="Client ID (required)"/>
+        </div>
+        <div class="row" style="margin-bottom:6px">
+          <input id="pf-email" class="input" placeholder="Email (optional)"/>
+        </div>
+        <div class="row">
+          <input id="pf-token" class="input" placeholder="API Token (optional)"/>
+          <button id="pf-save" class="btn primary">Save</button>
+        </div>
+        <div id="pf-msg" class="label" style="margin-top:6px;"></div>
       </div>
-      <div id="filehint" style="margin-top:8px;color:#000;font-size:12px;">State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.</div>
+
+      <div class="section">
+        <div class="row">
+          <button id="btn-newchat" class="btn primary">New Chat</button>
+        </div>
+      </div>
+
+      <div class="section" style="border-bottom:none; padding-bottom:0"><div class="label">Chats</div></div>
+      <div id="chatlist" class="chats"></div>
+    </aside>
+
+    <!-- Main pane -->
+    <main class="main">
+      <div class="header"><div class="title">Advisor</div></div>
+
+      <div class="content">
+        <div class="container">
+          <div id="thread" class="thread"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Composer -->
+  <div class="composer">
+    <div class="bar">
+      <input id="file" type="file" multiple accept=".pdf,.txt,.docx"/>
+      <div id="input" class="cin" contenteditable="true" data-placeholder="Message the Advisor… (Shift+Enter for newline)"></div>
+      <button id="attach" class="iconbtn" title="Add files">+</button>
+      <button id="send" class="send" title="Send" aria-label="Send">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="m5 12 14-7-4 14-3-5-7-2z" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+    <div id="filehint" style="max-width:900px; margin:8px auto 0; color:#000; font-size:12px;">
+      State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.
     </div>
   </div>
-</div>
-<script>
-  const elThread=document.getElementById('thread'), elInput=document.getElementById('input'), elSend=document.getElementById('send'), elAttach=document.getElementById('attach'), elFile=document.getElementById('file'), elHint=document.getElementById('filehint');
-  let lastQuestion="", currentChatId=null;
 
-  function now(){return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
+<script>
+  // ====== State ======
+  let currentChatId = null;
+  let state = {
+    userId: localStorage.getItem('userId') || 'demo',
+    email:  localStorage.getItem('email')  || '',
+    token:  localStorage.getItem('apiToken') || ''
+  };
+
+  // ====== Elements ======
+  const elThread  = document.getElementById('thread');
+  const elInput   = document.getElementById('input');
+  const elSend    = document.getElementById('send');
+  const elAttach  = document.getElementById('attach');
+  const elFile    = document.getElementById('file');
+  const elHint    = document.getElementById('filehint');
+  const elPfId    = document.getElementById('pf-id');
+  const elPfEmail = document.getElementById('pf-email');
+  const elPfToken = document.getElementById('pf-token');
+  const elPfSave  = document.getElementById('pf-save');
+  const elPfMsg   = document.getElementById('pf-msg');
+  const elChatList= document.getElementById('chatlist');
+
+  // Prefill profile inputs
+  elPfId.value    = state.userId || '';
+  elPfEmail.value = state.email || '';
+  elPfToken.value = state.token || '';
+
+  function now(){ return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) }
+
   function addMessage(role, html){
-    const wrap=document.createElement('div'); wrap.className='msg '+(role==='user'?'user':'advisor');
-    const meta=`<div class="meta">${role==='user'?'You':'Advisor'} · ${now()}</div>`;
-    wrap.innerHTML=meta+`<div class="bubble">${html}</div>`;
-    elThread.appendChild(wrap); elThread.scrollTop=elThread.scrollHeight;
+    const wrap = document.createElement('div');
+    wrap.className = 'msg ' + (role === 'user' ? 'user' : 'advisor');
+    const meta = `<div class="meta">${role==='user'?'You':'Advisor'} · ${now()}</div>`;
+    wrap.innerHTML = meta + `<div class="bubble">${html}</div>`;
+    elThread.appendChild(wrap);
+    elThread.scrollTop = elThread.scrollHeight;
   }
 
+  // ====== Formatting helpers ======
   function mdToHtml(md){
-    if(!md) return ''; if (/<\\w+[^>]*>/.test(md)) return md;
-    let h=md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    h=h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
-    h=h.replace(/`([^`]+?)`/g,'<code>$1</code>');
-    h=h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>').replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>').replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
-    h=h.replace(/^>\\s?(.*)$/gm,'<blockquote>$1</blockquote>');
-    h=h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>').replace(/__(.+?)__/g,'<strong>$1</strong>').replace(/\\*(?!\\s)(.+?)\\*/g,'<em>$1</em>').replace(/_(?!\\s)(.+?)_/g,'<em>$1</em>');
-    h=h.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
-    h=h.replace(/(^|\\s)(https?:\\/\\/[^\\s<]+)(?=\\s|$)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
-    h=h.replace(/(?:^|\\n)(\\d+)\\.\\s+(.+)(?:(?=\\n\\d+\\.\\s)|$)/gms,(m)=>{const items=m.trim().split(/\\n(?=\\d+\\.\\s)/).map(it=>it.replace(/^\\d+\\.\\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ol>${items}</ol>`;});
-    h=h.replace(/(?:^|\\n)[*-]\\s+(.+)(?:(?=\\n[*-]\\s)|$)/gms,(m)=>{const items=m.trim().split(/\\n(?=[*-]\\s)/).map(it=>it.replace(/^[*-]\\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ul>${items}</ul>`;});
-    h=h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
+    if(!md) return '';
+    if (/<\\w+[^>]*>/.test(md)) return md;
+    let h = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    h = h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+    h = h.replace(/`([^`]+?)`/g,'<code>$1</code>');
+    h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>').replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>').replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
+    h = h.replace(/^>\\s?(.*)$/gm,'<blockquote>$1</blockquote>');
+    h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>').replace(/__(.+?)__/g,'<strong>$1</strong>').replace(/\\*(?!\\s)(.+?)\\*/g,'<em>$1</em>').replace(/_(?!\\s)(.+?)_/g,'<em>$1</em>');
+    h = h.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+    h = h.replace(/(^|\\s)(https?:\\/\\/[^\\s<]+)(?=\\s|$)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    h = h.replace(/(?:^|\\n)(\\d+)\\.\\s+(.+)(?:(?=\\n\\d+\\.\\s)|$)/gms,(m)=>{const items=m.trim().split(/\\n(?=\\d+\\.\\s)/).map(it=>it.replace(/^\\d+\\.\\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ol>${items}</ol>`;});
+    h = h.replace(/(?:^|\\n)[*-]\\s+(.+)(?:(?=\\n[*-]\\s)|$)/gms,(m)=>{const items=m.trim().split(/\\n(?=[*-]\\s)/).map(it=>it.replace(/^[*-]\\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ul>${items}</ul>`;});
+    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
     return h;
   }
   function applyInlineFormatting(html){
     if(!html) return ''; let out=String(html); const slots=[];
     function protect(tag){ const re=new RegExp(`<${tag}\\\\b[^>]*>[\\\\s\\\\S]*?<\\\\/${tag}>`,'gi'); out=out.replace(re,m=>{const key=`__SLOT_${tag.toUpperCase()}_${slots.length}__`; slots.push({key,val:m}); return key;});}
-    protect('code');protect('pre');protect('a');
-    out=out.replace(/\\*\\*([^*]+?)\\*\\*/g,'<strong>$1</strong>').replace(/__([^_]+?)__/g,'<strong>$1</strong>').replace(/(^|[^*])\\*([^*\\n]+?)\\*/g,'$1<em>$2</em>').replace(/(^|[^_])_([^_\\n]+?)_/g,'$1<em>$2</em>');
-    for(const {key,val} of slots) out=out.replace(key,val); return out;
+    protect('code'); protect('pre'); protect('a');
+    out = out.replace(/\\*\\*([^*]+?)\\*\\*/g,'<strong>$1</strong>')
+             .replace(/__([^_]+?)__/g,'<strong>$1</strong>')
+             .replace(/(^|[^*])\\*([^*\\n]+?)\\*/g,'$1<em>$2</em>')
+             .replace(/(^|[^_])_([^_\\n]+?)_/g,'$1<em>$2</em>');
+    for(const {key,val} of slots) out=out.replace(key,val);
+    return out;
   }
   function normalizeTrustDoc(html){
     let out=html;
     out=out.replace(/<p>\\s*<strong>\\s*([A-Z0-9][A-Z0-9\\s\\-&,.'()]+?)\\s*<\\/strong>\\s*<\\/p>/g,'<h2>$1</h2><p></p>');
     const map=[{re:/<strong>\\s*TRUST\\s*NAME\\s*:\\s*<\\/strong>/gi,rep:'Trust: '},{re:/<strong>\\s*DATE\\s*:\\s*<\\/strong>/gi,rep:'Date: '},{re:/<strong>\\s*TAX\\s*YEAR\\s*:\\s*<\\/strong>/gi,rep:'Tax Year: '},{re:/<strong>\\s*TRUSTEE\\(S\\)\\s*:\\s*<\\/strong>/gi,rep:'Trustee(s): '},{re:/<strong>\\s*LOCATION\\s*:\\s*<\\/strong>/gi,rep:'Location: '}];
-    map.forEach(({re,rep})=>{out=out.replace(re,rep)});
+    map.forEach(({re,rep})=>{ out=out.replace(re,rep) });
     out=out.replace(/<strong>\\s*([A-Za-z][A-Za-z()\\s]+:)\\s*<\\/strong>\\s*/g,'$1 ');
     out=out.replace(/\\*\\*\\s*TRUST\\s*NAME\\s*:\\s*\\*\\*/gi,'Trust: ').replace(/\\*\\*\\s*DATE\\s*:\\s*\\*\\*/gi,'Date: ').replace(/\\*\\*\\s*TAX\\s*YEAR\\s*:\\s*\\*\\*/gi,'Tax Year: ').replace(/\\*\\*\\s*TRUSTEE\\(S\\)\\s*:\\s*\\*\\*/gi,'Trustee(s): ').replace(/\\*\\*\\s*LOCATION\\s*:\\s*\\*\\*/gi,'Location: ');
     return out;
   }
 
-  function readInput(){const tmp=elInput.cloneNode(true); tmp.querySelectorAll('div').forEach(d=>{if(d.innerHTML==="<br>") d.innerHTML="\\n"}); return tmp.innerText.replace(/\\u00A0/g,' ').trim();}
-  async function callRag(q, chatId){const url=new URL('/rag', location.origin); url.searchParams.set('question',q); if(chatId) url.searchParams.set('chat_id', chatId); url.searchParams.set('top_k','12'); const r=await fetch(url,{method:'GET'}); if(!r.ok) throw new Error('RAG failed: '+r.status); return r.json();}
-  async function callReview(q, files, chatId){const fd=new FormData(); fd.append('question', q); for(const f of files) fd.append('files', f); if(chatId) fd.append('chat_id', chatId); const r=await fetch('/review',{method:'POST', body:fd}); if(!r.ok) throw new Error('Review failed: '+r.status); return r.json();}
+  // ====== Fetch helpers with headers ======
+  function hdrs(){
+    const h = { 'X-User-Id': state.userId };
+    if (state.token) h['Authorization'] = 'Bearer ' + state.token;
+    return h;
+  }
+  async function getJSON(url){
+    const r = await fetch(url, {headers: hdrs()});
+    if(!r.ok) throw new Error(url+': '+r.status);
+    return r.json();
+  }
+  async function postForm(url, form){
+    const r = await fetch(url, {method:'POST', headers: hdrs(), body: form});
+    if(!r.ok) throw new Error(url+': '+r.status);
+    return r.json();
+  }
+
+  // ====== Profile save ======
+  document.getElementById('pf-save').addEventListener('click', ()=>{
+    const uid = elPfId.value.trim();
+    const em  = elPfEmail.value.trim();
+    const tk  = elPfToken.value.trim();
+    if(!uid){ elPfMsg.textContent='Client ID is required.'; return; }
+    state.userId = uid; state.email = em; state.token = tk;
+    localStorage.setItem('userId', uid);
+    localStorage.setItem('email', em);
+    localStorage.setItem('apiToken', tk);
+    elPfMsg.textContent = 'Saved.';
+    // reload chat list for this user
+    loadChats();
+  });
+
+  // ====== Chat list / tabs ======
+  async function loadChats(){
+    elChatList.innerHTML = '';
+    try{
+      const data = await getJSON('/chats');
+      (data.items || []).forEach(ch=>{
+        const div = document.createElement('div');
+        div.className = 'chatitem' + (currentChatId===ch.id ? ' active' : '');
+        div.innerHTML = `<div>${(ch.title||'Untitled')}</div><div class="chatmeta">${new Date(ch.updated_at).toLocaleString()}</div>`;
+        div.addEventListener('click', ()=> openChat(ch.id));
+        elChatList.appendChild(div);
+      });
+    }catch(e){
+      elChatList.innerHTML = '<div class="label">Failed to load chats.</div>';
+    }
+  }
+
+  async function openChat(chatId){
+    currentChatId = chatId;
+    // highlight active
+    document.querySelectorAll('.chatitem').forEach(x=>x.classList.remove('active'));
+    const items = Array.from(document.querySelectorAll('.chatitem'));
+    const idx = (items.findIndex(x => (x.textContent||'').includes(chatId)) ); // not reliable; refresh list
+    await loadChats(); // refresh then highlight
+    // load messages
+    elThread.innerHTML = '';
+    try{
+      const data = await getJSON(`/chats/${chatId}`);
+      (data.messages || []).forEach(m=>{
+        addMessage(m.role === 'user' ? 'user' : 'advisor', m.content_html);
+      });
+    }catch(e){
+      addMessage('advisor', `<p style="color:#b91c1c">Failed to load chat: ${e}</p>`);
+    }
+  }
+
+  // New chat
+  document.getElementById('btn-newchat').addEventListener('click', async ()=>{
+    try{
+      const form = new FormData();
+      const res  = await postForm('/chats', form); // POST /chats returns {chat_id}
+      currentChatId = res.chat_id;
+      await loadChats();
+      elThread.innerHTML = '';
+      addMessage('advisor', '<p>New chat created. How may I assist?</p>');
+    }catch(e){
+      addMessage('advisor', `<p style="color:#b91c1c">Failed to create chat: ${e}</p>`);
+    }
+  });
+
+  // ====== RAG calls ======
+  function readInput(){
+    const tmp = elInput.cloneNode(true);
+    tmp.querySelectorAll('div').forEach(d=>{ if (d.innerHTML === "<br>") d.innerHTML = "\\n"; });
+    return tmp.innerText.replace(/\\u00A0/g,' ').trim();
+  }
+
+  async function callRag(q, chatId){
+    const url = new URL('/rag', location.origin);
+    url.searchParams.set('question', q);
+    if (chatId) url.searchParams.set('chat_id', chatId);
+    url.searchParams.set('top_k','12');
+    const r = await fetch(url, {method:'GET', headers: hdrs()});
+    if(!r.ok) throw new Error('RAG failed: '+r.status);
+    return r.json();
+  }
+
+  async function callReview(q, files, chatId){
+    const fd = new FormData();
+    fd.append('question', q);
+    for(const f of files) fd.append('files', f);
+    if (chatId) fd.append('chat_id', chatId);
+    const r = await fetch('/review', {method:'POST', headers: hdrs(), body: fd});
+    if(!r.ok) throw new Error('Review failed: '+r.status);
+    return r.json();
+  }
 
   async function handleSend(q){
     if(!q) return;
-    addMessage('user', q.replace(/\\n/g,'<br>')); lastQuestion=q;
-    const work=document.createElement('div'); work.className='msg advisor';
-    work.innerHTML=`<div class="meta">Advisor · thinking…</div><div class="bubble"><p>Working…</p></div>`;
-    elThread.appendChild(work); elThread.scrollTop=elThread.scrollHeight;
+    addMessage('user', q.replace(/\\n/g,'<br>'));
+    const work = document.createElement('div');
+    work.className = 'msg advisor';
+    work.innerHTML = `<div class="meta">Advisor · thinking…</div><div class="bubble"><p>Working…</p></div>`;
+    elThread.appendChild(work); elThread.scrollTop = elThread.scrollHeight;
+
     try{
-      const files = Array.from(elFile.files||[]);
+      const files = Array.from(elFile.files || []);
       const data  = files.length ? await callReview(q, files, currentChatId) : await callRag(q, currentChatId);
       if (data && data.chat_id) currentChatId = data.chat_id;
+      // refresh chat list to move this chat to top
+      loadChats();
+
       let html = (data && data.answer) ? data.answer : '';
       const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
       let rendered = looksHtml ? html : mdToHtml(String(html||''));
       rendered = applyInlineFormatting(rendered);
       rendered = normalizeTrustDoc(rendered);
-      work.querySelector('.meta').textContent='Advisor · '+now();
-      work.querySelector('.bubble').outerHTML=`<div class="bubble">${rendered}</div>`;
+
+      work.querySelector('.meta').textContent = 'Advisor · ' + now();
+      work.querySelector('.bubble').outerHTML = `<div class="bubble">${rendered}</div>`;
     }catch(e){
-      work.querySelector('.meta').textContent='Advisor · error';
-      work.querySelector('.bubble').innerHTML='<p style="color:#b91c1c">Error: '+(e && e.message? e.message : String(e))+'</p>';
+      work.querySelector('.meta').textContent = 'Advisor · error';
+      work.querySelector('.bubble').innerHTML = '<p style="color:#b91c1c">Error: '+(e && e.message ? e.message : String(e))+'</p>';
     }
   }
 
-  elInput.addEventListener('keydown',(ev)=>{ if (ev.key==='Enter' && !ev.shiftKey){ ev.preventDefault(); const q=readInput(); if(!q) return; elInput.innerHTML=''; handleSend(q);} });
-  elSend.addEventListener('click',()=>{const q=readInput(); if(!q) return; elInput.innerHTML=''; handleSend(q);});
-  elAttach.addEventListener('click',()=>{ elFile.click(); });
-  elFile.addEventListener('change',()=>{ if(elFile.files && elFile.files.length){ elHint.textContent = `${elFile.files.length} file${elFile.files.length>1?'s':''} selected.`; } else { elHint.textContent = 'State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.'; }});
+  // Send & attach events
+  elInput.addEventListener('keydown', (ev)=>{
+    if (ev.key === 'Enter' && !ev.shiftKey){
+      ev.preventDefault();
+      const q = readInput();
+      if (!q) return;
+      elInput.innerHTML = '';
+      handleSend(q);
+    }
+  });
+  elSend.addEventListener('click', ()=>{
+    const q = readInput();
+    if (!q) return;
+    elInput.innerHTML = '';
+    handleSend(q);
+  });
+  elAttach.addEventListener('click', ()=> elFile.click());
+  elFile.addEventListener('change', ()=>{
+    if (elFile.files && elFile.files.length){
+      elHint.textContent = `${elFile.files.length} file${elFile.files.length>1?'s':''} selected.`;
+    }else{
+      elHint.textContent = 'State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.';
+    }
+  });
+
+  // Initial load
+  loadChats();
 </script>
 </body>
 </html>
@@ -568,13 +824,8 @@ def rag_endpoint(
     check_rate_limit()
     conn = db()
     try:
-        # ensure chat
         chat_id = ensure_chat(conn, user_id, chat_id)
-
-        # store user message (raw goes in content_raw, client renders)
         insert_message(conn, chat_id, user_id, "user", content_html=f"<p>{question}</p>", content_raw=question, meta={"t_ms":0})
-
-        # retrieve context
         t0 = time.time()
         emb = client.embeddings.create(model="text-embedding-3-small", input=question).data[0].embedding
         flt = {"doc_level": {"$eq": level}} if level else None
@@ -584,10 +835,7 @@ def rag_endpoint(
         snippets = [s for s in (_extract_snippet(u.get("meta", {})) for u in uniq) if s]
         html = synthesize_html(question, uniq, snippets)
         elapsed = int((time.time()-t0)*1000)
-
-        # persist advisor message
         insert_message(conn, chat_id, None, "advisor", content_html=html, content_raw=None, meta={"t_ms": elapsed})
-
         return {"answer": html, "t_ms": elapsed, "chat_id": chat_id}
     except Exception as e:
         traceback.print_exc()
