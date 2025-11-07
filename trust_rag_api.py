@@ -165,7 +165,7 @@ def synthesize_html(question: str, uniq_sources: list[dict], snippets: list[str]
     except Exception as e:
         return f"<p><em>(Synthesis unavailable: {e})</em></p>"
 
-# ========== WIDGET (no avatars, no initial advisor bubble, user light-blue, advisor unboxed) ==========
+# ========== WIDGET ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -175,7 +175,7 @@ WIDGET_HTML = """<!doctype html>
 <style>
   :root{
     --bg:#ffffff; --text:#000000; --border:#e5e5e5; --ring:#d9d9d9;
-    --user:#e8f1ff; /* light blue for user's question */
+    --user:#e8f1ff;
     --shadow:0 1px 2px rgba(0,0,0,.03), 0 8px 24px rgba(0,0,0,.04);
     --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial;
     --title:"Cinzel",serif;
@@ -210,13 +210,13 @@ WIDGET_HTML = """<!doctype html>
   .bubble pre{background:#fff;color:#000;border:1px solid var(--border);padding:12px;border-radius:12px;overflow:auto}
   .bubble blockquote{border-left:3px solid #000;padding:6px 12px;margin:8px 0;background:#fafafa}
 
-  .composer{position:fixed;bottom:0;left:0;right:0;background:#fff;padding:18px 12px; /* no divider */ border-top:none}
+  /* Composer with NO top divider line */
+  .composer{position:fixed;bottom:0;left:0;right:0;background:#fff;padding:18px 12px;border-top:none}
   .composer .inner{max-width:900px;margin:0 auto}
   .bar{display:flex;align-items:flex-end;gap:8px;background:#fff;border:1px solid var(--ring);border-radius:22px;padding:8px;box-shadow:var(--shadow)}
   .input{flex:1;min-height:24px;max-height:160px;overflow:auto;outline:none;padding:8px 10px;font:16px/1.5 var(--font);color:#000}
   .input:empty:before{content:attr(data-placeholder);color:#000}
   .btn{cursor:pointer}
-
   .send{padding:8px 12px;border-radius:12px;background:#000;color:#fff;border:1px solid #000}
   .attach{padding:8px 10px;border-radius:12px;background:#fff;color:#000;border:1px solid var(--border)}
 
@@ -312,36 +312,8 @@ WIDGET_HTML = """<!doctype html>
 
   // Markdown -> HTML with full formatting (bold, italic, links, blockquotes, code, lists).
   function mdToHtml(md){
-    // Convert leftover **bold**, *italic* that still appear in HTML.
-  function applyInlineFormatting(html) {
-    if (!html) return '';
-    let out = String(html);
-
-    // Protect code and links so they’re not touched
-    const slots = [];
-    function protect(tag) {
-      const re = new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi');
-      out = out.replace(re, m => {
-        const key = `__SLOT_${tag.toUpperCase()}_${slots.length}__`;
-        slots.push({ key, val: m });
-        return key;
-      });
-    }
-    protect('code'); protect('pre'); protect('a');
-
-    // Replace markdown bold/italic in remaining text
-    out = out
-      .replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>')
-      .replace(/__([^_]+?)__/g, '<strong>$1</strong>')
-      .replace(/(^|[^*])\*([^*\n]+?)\*/g, '$1<em>$2</em>')
-      .replace(/(^|[^_])_([^_\n]+?)_/g, '$1<em>$2</em>');
-
-    // Restore protected blocks
-    for (const { key, val } of slots) out = out.replace(key, val);
-    return out;
-  }
     if(!md) return '';
-    // If already HTML-like, trust it so <strong>/<em>/<a> are preserved (prevents visible **asterisks**)
+    // If already HTML-like, trust it so <strong>/<em>/<a> are preserved
     if (/<\\w+[^>]*>/.test(md)) return md;
 
     let h = md;
@@ -390,6 +362,35 @@ WIDGET_HTML = """<!doctype html>
     return h;
   }
 
+  // Convert leftover **bold**/*italic* that still appear inside HTML (runs after md/html detection)
+  function applyInlineFormatting(html) {
+    if (!html) return '';
+    let out = String(html);
+
+    // Protect <code>, <pre>, <a> blocks
+    const slots = [];
+    function protect(tag) {
+      const re = new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi');
+      out = out.replace(re, m => {
+        const key = `__SLOT_${tag.toUpperCase()}_${slots.length}__`;
+        slots.push({ key, val: m });
+        return key;
+      });
+    }
+    protect('code'); protect('pre'); protect('a');
+
+    // Replace markdown bold/italic in remaining text
+    out = out
+      .replace(/\\*\\*([^*]+?)\\*\\*/g, '<strong>$1</strong>')
+      .replace(/__([^_]+?)__/g, '<strong>$1</strong>')
+      .replace(/(^|[^*])\\*([^*\\n]+?)\\*/g, '$1<em>$2</em>')
+      .replace(/(^|[^_])_([^_\\n]+?)_/g, '$1<em>$2</em>');
+
+    // Restore protected blocks
+    for (const { key, val } of slots) out = out.replace(key, val);
+    return out;
+  }
+
   // === API helpers ===
   async function callRag(q){
     const url=new URL('/rag', location.origin);
@@ -435,11 +436,10 @@ WIDGET_HTML = """<!doctype html>
 
       // If model already returned HTML, use it; otherwise convert markdown to HTML
       const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
-     let rendered = looksHtml ? html : mdToHtml(String(html||''));
-rendered = applyInlineFormatting(rendered);  // <-- converts any leftover ** or * to <strong>/<em>
-rendered = normalizeTrustDoc(rendered);      // keep normalization next
+      let rendered = looksHtml ? html : mdToHtml(String(html||''));
 
-      // Normalize trust/contract label formatting to colon style, remove bold labels/asterisks artifacts
+      // Convert any leftover **/*** to <strong>/<em>, then normalize trust doc labels
+      rendered = applyInlineFormatting(rendered);
       rendered = normalizeTrustDoc(rendered);
 
       work.querySelector('.meta').textContent = 'Advisor · ' + now();
@@ -461,7 +461,7 @@ rendered = normalizeTrustDoc(rendered);      // keep normalization next
     }
   });
 
-  // Click handlers (explicit type="button" so no form submit interference)
+  // Click handlers
   elSend.addEventListener('click', ()=>{
     const q = readInput();
     if (!q) return;
@@ -470,9 +470,7 @@ rendered = normalizeTrustDoc(rendered);      // keep normalization next
   });
 
   // "+" attach button opens file dialog; show selected file count
-  elAttach.addEventListener('click', ()=>{
-    elFile.click();
-  });
+  elAttach.addEventListener('click', ()=>{ elFile.click(); });
   elFile.addEventListener('change', ()=>{
     if (elFile.files && elFile.files.length){
       elHint.textContent = `${elFile.files.length} file${elFile.files.length>1?'s':''} selected.`;
@@ -529,6 +527,7 @@ def search_endpoint(
         res = idx.query(vector=emb, top_k=max(top_k, 12), include_metadata=True, filter=flt)
         matches = res["matches"] if isinstance(res, dict) else getattr(res, "matches", [])
         uniq = _dedup_and_rank_sources(matches, top_k=top_k)
+
         titles = _titles_only(uniq)
         rows = []
         for s in uniq:
