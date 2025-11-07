@@ -210,16 +210,16 @@ WIDGET_HTML = """<!doctype html>
   .bubble pre{background:#fff;color:#000;border:1px solid var(--border);padding:12px;border-radius:12px;overflow:auto}
   .bubble blockquote{border-left:3px solid #000;padding:6px 12px;margin:8px 0;background:#fafafa}
 
-  /* composer has NO divider line */
-  .composer{position:fixed;bottom:0;left:0;right:0;background:#fff;padding:18px 12px;border-top:none}
+  /* composer has NO divider line; high z-index so nothing blocks clicks */
+  .composer{position:fixed;bottom:0;left:0;right:0;background:#fff;padding:18px 12px;border-top:none;z-index:9999;pointer-events:auto}
   .composer .inner{max-width:900px;margin:0 auto}
   .bar{display:flex;align-items:flex-end;gap:8px;background:#fff;border:1px solid var(--ring);border-radius:22px;padding:8px;box-shadow:var(--shadow)}
   .input{flex:1;min-height:24px;max-height:160px;overflow:auto;outline:none;padding:8px 10px;font:16px/1.5 var(--font);color:#000}
   .input:empty:before{content:attr(data-placeholder);color:#000}
 
   .btn{cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:manipulation}
-  .send{padding:8px 12px;border-radius:12px;background:#000;color:#fff;border:1px solid #000}
-  .attach{padding:8px 10px;border-radius:12px;background:#fff;color:#000;border:1px solid var(--border)}
+  .send{padding:8px 12px;border-radius:12px;background:#000;color:#fff;border:1px solid #000;display:flex;align-items:center;justify-content:center}
+  .attach{padding:8px 10px;border-radius:12px;background:#fff;color:#000;border:1px solid var(--border);display:flex;align-items:center;justify-content:center}
 
   a{color:#000;text-decoration:underline}
   a:hover{text-decoration:none}
@@ -244,9 +244,9 @@ WIDGET_HTML = """<!doctype html>
       <div class="bar">
         <input id="file" type="file" multiple accept=".pdf,.txt,.docx" />
         <div id="input" class="input" role="textbox" aria-multiline="true" contenteditable="true" data-placeholder="Message the Advisor… (Shift+Enter for newline)"></div>
-        <button id="attachBtn" class="attach btn" type="button" title="Add files" aria-label="Add files">+</button>
-        <button id="sendBtn" class="send btn" type="button" title="Send" aria-label="Send">
-          <!-- paper-plane icon -->
+        <!-- Inline onclick as a hard fallback -->
+        <button id="attachBtn" class="attach btn" type="button" title="Add files" aria-label="Add files" onclick="window._advisorAttach && window._advisorAttach()">+</button>
+        <button id="sendBtn" class="send btn" type="button" title="Send" aria-label="Send" onclick="window._advisorSend && window._advisorSend()">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="m5 12 14-7-4 14-3-5-7-2z" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
@@ -260,11 +260,11 @@ WIDGET_HTML = """<!doctype html>
 </div>
 
 <script>
+/* ===== Robust init: inline handlers, DOM listeners, and delegation ===== */
 (() => {
   'use strict';
 
-  // Ensure handlers attach AFTER DOM is ready
-  window.addEventListener('DOMContentLoaded', () => {
+  const bind = () => {
     const $ = (id) => document.getElementById(id);
 
     const elThread = $('thread');
@@ -274,17 +274,15 @@ WIDGET_HTML = """<!doctype html>
     const elFile   = $('file');
     const elHint   = $('filehint');
 
-    // Guard: if any critical element missing, log and abort to avoid silent failure
-    if (!elThread || !elInput || !elSend || !elAttach) {
-      console.error('Widget init error: element missing', {elThread, elInput, elSend, elAttach});
+    if (!elThread || !elInput || !elSend || !elAttach || !elFile) {
+      console.error('Widget init error: element missing', {elThread, elInput, elSend, elAttach, elFile});
       return;
     }
 
     let lastQuestion = "";
-    let sending = false; // block double-submits
+    let sending = false;
 
     function now(){ return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) }
-
     function addMessage(role, html){
       const wrap = document.createElement('div');
       wrap.className = 'msg ' + (role === 'user' ? 'user' : 'advisor');
@@ -294,35 +292,25 @@ WIDGET_HTML = """<!doctype html>
       elThread.scrollTop = elThread.scrollHeight;
     }
 
-    // Protect code blocks during regex replacements
     function protectBlocks(html){
-      const buckets = [];
-      let i = 0;
-      html = html.replace(/<pre[\s\S]*?<\/pre>/gi, m=>{
-        const key = `__BLOCK_PRE_${i++}__`; buckets.push([key, m]); return key;
-      });
-      html = html.replace(/<code[\s\S]*?<\/code>/gi, m=>{
-        const key = `__BLOCK_CODE_${i++}__`; buckets.push([key, m]); return key;
-      });
+      const buckets = []; let i = 0;
+      html = html.replace(/<pre[\s\S]*?<\/pre>/gi, m=>{ const k=`__PRE_${i++}__`; buckets.push([k,m]); return k; });
+      html = html.replace(/<code[\s\S]*?<\/code>/gi, m=>{ const k=`__CODE_${i++}__`; buckets.push([k,m]); return k; });
       return { html, buckets };
     }
-    function restoreBlocks(html, buckets){
-      for (const [key, val] of buckets) html = html.replaceAll(key, val);
-      return html;
-    }
+    function restoreBlocks(html, buckets){ for(const [k,v] of buckets) html = html.replaceAll(k,v); return html; }
 
     function normalizeTrustDoc(html){
       let out = html;
-      out = out.replace(/<p>\s*<strong>\s*([A-Z0-9][A-Z0-9\s\-&,.'()]+?)\s*<\/strong>\s*<\/p>/g,
-                        '<h2>$1</h2><p></p>');
-      const labelMap = [
+      out = out.replace(/<p>\s*<strong>\s*([A-Z0-9][A-Z0-9\s\-&,.'()]+?)\s*<\/strong>\s*<\/p>/g,'<h2>$1</h2><p></p>');
+      const map = [
         {re:/<strong>\s*TRUST\s*NAME\s*:\s*<\/strong>/gi, rep:'Trust: '},
         {re:/<strong>\s*DATE\s*:\s*<\/strong>/gi, rep:'Date: '},
         {re:/<strong>\s*TAX\s*YEAR\s*:\s*<\/strong>/gi, rep:'Tax Year: '},
         {re:/<strong>\s*TRUSTEE\(S\)\s*:\s*<\/strong>/gi, rep:'Trustee(s): '},
         {re:/<strong>\s*LOCATION\s*:\s*<\/strong>/gi, rep:'Location: '},
       ];
-      labelMap.forEach(({re,rep})=>{ out = out.replace(re, rep); });
+      map.forEach(({re,rep})=> out = out.replace(re, rep));
       out = out.replace(/<strong>\s*([A-Za-z][A-Za-z()\s]+:)\s*<\/strong>\s*/g, '$1 ');
       out = out.replace(/\*\*\s*TRUST\s*NAME\s*:\s*\*\*/gi, 'Trust: ')
                .replace(/\*\*\s*DATE\s*:\s*\*\*/gi, 'Date: ')
@@ -335,9 +323,7 @@ WIDGET_HTML = """<!doctype html>
     function mdToHtml(md){
       if(!md) return '';
       if (/<\w+[^>]*>/.test(md)) return md;
-
-      let h = md;
-      h = h.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      let h = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
       h = h.replace(/```([\s\S]*?)```/g, (_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
       h = h.replace(/`([^`]+?)`/g, '<code>$1</code>');
       h = h.replace(/^######\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\s+(.*)$/gm,'<h5>$1</h5>')
@@ -350,11 +336,11 @@ WIDGET_HTML = """<!doctype html>
            .replace(/_(?!\s)(.+?)_/g,'<em>$1</em>');
       h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
       h = h.replace(/(^|\s)(https?:\/\/[^\s<]+)(?=\s|$)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
-      h = h.replace(/(?:^|\n)(\d+)\.\s+(.+)(?:(?=\n\d+\.\s)|$)/gms, (m)=>{
+      h = h.replace(/(?:^|\n)(\d+)\.\s+(.+)(?:(?=\n\d+\.\s)|$)/gms, m=>{
         const items = m.trim().split(/\n(?=\d+\.\s)/).map(it=>it.replace(/^\d+\.\s+/, '')).map(t=>`<li>${t}</li>`).join('');
         return `<ol>${items}</ol>`;
       });
-      h = h.replace(/(?:^|\n)[*-]\s+(.+)(?:(?=\n[*-]\s)|$)/gms, (m)=>{
+      h = h.replace(/(?:^|\n)[*-]\s+(.+)(?:(?=\n[*-]\s)|$)/gms, m=>{
         const items = m.trim().split(/\n(?=[*-]\s)/).map(it=>it.replace(/^[*-]\s+/, '')).map(t=>`<li>${t}</li>`).join('');
         return `<ul>${items}</ul>`;
       });
@@ -369,16 +355,15 @@ WIDGET_HTML = """<!doctype html>
         out = mdToHtml(out);
       } else {
         const saved = protectBlocks(out);
-        out = saved.html;
-        out = out.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
-                 .replace(/__(.+?)__/g,'<strong>$1</strong>')
-                 .replace(/\*(?!\s)(.+?)\*/g,'<em>$1</em>')
-                 .replace(/_(?!\s)(.+?)_/g,'<em>$1</em>')
-                 .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+        out = saved.html
+          .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+          .replace(/__(.+?)__/g,'<strong>$1</strong>')
+          .replace(/\*(?!\s)(.+?)\*/g,'<em>$1</em>')
+          .replace(/_(?!\s)(.+?)_/g,'<em>$1</em>')
+          .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
         out = restoreBlocks(out, saved.buckets);
       }
-      out = normalizeTrustDoc(out);
-      return out;
+      return normalizeTrustDoc(out);
     }
 
     async function callRag(q){
@@ -389,7 +374,6 @@ WIDGET_HTML = """<!doctype html>
       if(!r.ok) throw new Error('RAG failed: '+r.status);
       return r.json();
     }
-
     async function callReview(q, files){
       const fd = new FormData();
       fd.append('question', q);
@@ -401,11 +385,8 @@ WIDGET_HTML = """<!doctype html>
 
     function readInput(){
       const tmp = elInput.cloneNode(true);
-      tmp.querySelectorAll('div').forEach(d=>{
-        if (d.innerHTML === "<br>") d.innerHTML = "\\n";
-      });
-      const text = tmp.innerText.replace(/\u00A0/g,' ').trim();
-      return text;
+      tmp.querySelectorAll('div').forEach(d=>{ if (d.innerHTML === "<br>") d.innerHTML = "\\n"; });
+      return tmp.innerText.replace(/\u00A0/g,' ').trim();
     }
 
     async function handleSend(q){
@@ -437,58 +418,48 @@ WIDGET_HTML = """<!doctype html>
       }
     }
 
-    // Keyboard: Enter to send; Shift+Enter newline
-    elInput.addEventListener('keydown', (ev)=>{
-      if (ev.key === 'Enter' && !ev.shiftKey){
-        ev.preventDefault();
-        const q = readInput();
-        if (!q) return;
-        elInput.innerHTML = '';
-        handleSend(q);
-      }
-    });
-
-    // Primary click handlers
-    elSend.addEventListener('click', ()=>{
+    // Expose hard-fallback global handlers for inline onclick
+    window._advisorSend = () => {
       const q = readInput();
       if (!q) return;
       elInput.innerHTML = '';
       handleSend(q);
-    });
-    elSend.addEventListener('pointerup', (e)=>{
-      if (e.pointerType === 'touch') {
-        const q = readInput();
-        if (!q) return;
-        elInput.innerHTML = '';
-        handleSend(q);
+    };
+    window._advisorAttach = () => elFile.click();
+
+    // Enter to send; Shift+Enter newline
+    elInput.addEventListener('keydown', (ev)=>{
+      if (ev.key === 'Enter' && !ev.shiftKey){
+        ev.preventDefault();
+        window._advisorSend();
       }
     });
 
-    elAttach.addEventListener('click', ()=> elFile.click());
-    elAttach.addEventListener('pointerup', (e)=>{ if (e.pointerType === 'touch') elFile.click(); });
+    // Normal listeners
+    elSend.addEventListener('click', window._advisorSend);
+    elAttach.addEventListener('click', window._advisorAttach);
 
-    elFile.addEventListener('change', ()=>{
-      if (elFile.files && elFile.files.length){
-        elHint.textContent = `${elFile.files.length} file${elFile.files.length>1?'s':''} selected.`;
-      }else{
-        elHint.textContent = 'State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.';
-      }
-    });
+    // Extra touch fallback
+    elSend.addEventListener('pointerup', (e)=>{ if (e.pointerType==='touch') window._advisorSend(); });
+    elAttach.addEventListener('pointerup', (e)=>{ if (e.pointerType==='touch') window._advisorAttach(); });
 
-    // Event delegation (belt-and-suspenders): if IDs ever change, still handle clicks
+    // Delegation safety net
     document.addEventListener('click', (ev)=>{
-      const t = ev.target.closest('button');
-      if (!t) return;
-      if (t.id === 'sendBtn') {
-        const q = readInput();
-        if (!q) return;
-        elInput.innerHTML = '';
-        handleSend(q);
-      } else if (t.id === 'attachBtn') {
-        elFile.click();
-      }
+      const b = ev.target.closest('button');
+      if (!b) return;
+      if (b.id === 'sendBtn') window._advisorSend();
+      if (b.id === 'attachBtn') window._advisorAttach();
     });
-  });
+  };
+
+  // Bind ASAP; also bind after DOMContentLoaded to survive hot reloads
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bind, { once:true });
+  } else {
+    bind();
+    // In some SPA reloads, run again after a tick:
+    setTimeout(bind, 0);
+  }
 })();
 </script>
 </body>
