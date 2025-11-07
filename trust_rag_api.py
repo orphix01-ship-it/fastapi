@@ -25,7 +25,7 @@ if os.getenv("OPENAI_BASE_URL", "").strip().lower() in ("", "none", "null"):
     os.environ.pop("OPENAI_BASE_URL", None)
 
 API_TOKEN         = os.getenv("API_TOKEN", "")      # optional bearer for /search, /rag & /review
-SYNTH_MODEL       = os.getenv("SYNTH_MODEL", "gpt-4o-mini")
+SYNTH_MODEL       = os.getenv("SYNTH_MODEL", "gpt-5-thinking")
 MAX_SNIPPETS      = int(os.getenv("MAX_SNIPPETS", "20"))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "24000"))
 MAX_OUT_TOKENS = int(os.getenv("MAX_OUT_TOKENS", "8192"))  # pick a high, sane default
