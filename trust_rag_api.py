@@ -137,6 +137,24 @@ init_db()
 def iso_now() -> str:
     return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
+# ---- Simple user helpers (demo only; not for production) ----
+def get_user(conn, username: str):
+    return conn.execute("SELECT id, email, name, role, settings_json FROM users WHERE id=?", (username,)).fetchone()
+
+def upsert_user(conn, username: str, email: str, password: str):
+    # WARNING: demo only (plaintext password). Replace with hashed passwords for production.
+    now = iso_now()
+    row = get_user(conn, username)
+    if row:
+        conn.execute("UPDATE users SET email=?, last_login_at=? WHERE id=?", (email or None, now, username))
+    else:
+        settings = {"password": password}
+        conn.execute(
+            "INSERT INTO users (id, email, name, role, settings_json, created_at, last_login_at) VALUES (?,?,?,?,?,?,?)",
+            (username, email or None, username, "client", json.dumps(settings), now, now)
+        )
+    conn.commit()
+
 # ========== CLIENTS ==========
 pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
 index_name = os.getenv("PINECONE_INDEX", "").strip()
@@ -372,7 +390,27 @@ def delete_chat(chat_id: str, user_id: str = Depends(get_current_user)):
     conn.close()
     return {"ok": True}
 
-# ========== WIDGET (Sidebar with Profile + Chat Tabs, rename, logout) ==========
+# ---- Simple login/logout endpoints (demo only) ----
+@app.post("/auth/login")
+def auth_login(
+    username: str = Form(...),
+    password: str = Form(...),
+    email: str = Form(None),
+):
+    if not username or not password:
+        raise HTTPException(400, "username and password are required")
+    conn = db()
+    try:
+        upsert_user(conn, username, email or "", password)
+        return {"user_id": username, "username": username}
+    finally:
+        conn.close()
+
+@app.post("/auth/logout")
+def auth_logout():
+    return {"ok": True}
+
+# ========== WIDGET (Sidebar with collapse toggle, Login, Chats, rename, logout) ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -389,16 +427,26 @@ WIDGET_HTML = """<!doctype html>
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--font)}
+
+  /* Collapsible grid */
   .app{display:grid; grid-template-columns: 280px 1fr; height:100vh}
+  .app.collapsed{grid-template-columns: 0 1fr;}
+  .app.collapsed .rail{width:0; border-right:none; overflow:hidden}
+  .app.collapsed .composer{left:0}
+
   .rail{border-right:1px solid var(--border); background:var(--rail); display:flex; flex-direction:column}
-  .brand{padding:14px 16px; text-align:center; border-bottom:1px solid var(--border)}
+  .brand{padding:14px 16px; border-bottom:1px solid var(--border)}
+  .brandline{display:flex; align-items:center; justify-content:space-between; gap:8px}
   .brand .title{font-family:var(--title); font-weight:300; font-size:18px}
+  .toggle-rail{border:1px solid var(--border); background:#fff; color:#000; border-radius:10px; padding:6px 8px; cursor:pointer}
+
   .section{padding:12px; border-bottom:1px solid var(--border)}
   .label{font-size:12px; color:#6b7280; margin-bottom:6px}
   .row{display:flex; gap:6px}
   .input{flex:1; border:1px solid var(--border); border-radius:10px; padding:6px 8px; background:#fff; color:#000}
   .btn{cursor:pointer; border:1px solid var(--border); background:#fff; color:#000; padding:6px 10px; border-radius:10px}
   .btn.primary{background:#000; color:#fff; border-color:#000}
+
   .chats{flex:1; overflow:auto; padding:8px}
   .chatitem{display:flex; justify-content:space-between; align-items:center; border:1px solid var(--border); background:#fff; padding:8px 10px; border-radius:10px; margin-bottom:8px}
   .chatitem .meta{font-size:12px; color:#6b7280}
@@ -439,29 +487,38 @@ WIDGET_HTML = """<!doctype html>
 </style>
 </head>
 <body>
-  <div class="app">
+  <div class="app" id="app">
     <!-- Left rail -->
     <aside class="rail">
-      <div class="brand"><div class="title">Private Trust Fiduciary Advisor</div></div>
-
-      <div class="section">
-        <div class="label">Profile</div>
-        <div class="row" style="margin-bottom:6px">
-          <input id="pf-id" class="input" placeholder="Client ID (required)"/>
+      <div class="brand">
+        <div class="brandline">
+          <div class="title">Private Trust Fiduciary Advisor</div>
+          <button id="toggle-rail" class="toggle-rail" title="Collapse sidebar">≡</button>
         </div>
-        <div class="row">
-          <input id="pf-email" class="input" placeholder="Email (optional)"/>
-        </div>
-        <div class="row" style="gap:8px; margin-top:8px">
-          <button id="pf-save" class="btn primary">Save</button>
-          <button id="pf-logout" class="btn">Log out</button>
-        </div>
-        <div id="pf-msg" class="label" style="margin-top:6px;"></div>
       </div>
 
-      <div class="section">
-        <div class="row">
+      <!-- Login (when logged out) -->
+      <div class="section" id="login-section">
+        <div class="label">Sign in</div>
+        <div class="row" style="margin-bottom:6px">
+          <input id="login-username" class="input" placeholder="Username (required)"/>
+        </div>
+        <div class="row" style="margin-bottom:6px">
+          <input id="login-password" class="input" placeholder="Password (required)" type="password"/>
+        </div>
+        <div class="row" style="gap:8px; margin-top:8px">
+          <button id="login-btn" class="btn primary">Log in</button>
+        </div>
+        <div id="login-msg" class="label" style="margin-top:6px;"></div>
+      </div>
+
+      <!-- Account (when logged in) -->
+      <div class="section" id="account-section" style="display:none">
+        <div class="label">Account</div>
+        <div id="acct-line" style="margin-bottom:8px; font-size:14px;"></div>
+        <div class="row" style="gap:8px; margin-top:8px">
           <button id="btn-newchat" class="btn primary">New Chat</button>
+          <button id="logout-btn" class="btn">Log out</button>
         </div>
       </div>
 
@@ -503,73 +560,94 @@ WIDGET_HTML = """<!doctype html>
   let currentChatId = null;
   let state = {
     userId: localStorage.getItem('userId') || '',
-    email:  localStorage.getItem('email')  || ''
+    username: localStorage.getItem('username') || '',
+    sidebarCollapsed: localStorage.getItem('sidebarCollapsed') === '1'
   };
 
   // ====== Elements ======
-  const elThread  = document.getElementById('thread');
-  const elInput   = document.getElementById('input');
-  const elSend    = document.getElementById('send');
-  const elAttach  = document.getElementById('attach');
-  const elFile    = document.getElementById('file');
-  const elHint    = document.getElementById('filehint');
-  const elPfId    = document.getElementById('pf-id');
-  const elPfEmail = document.getElementById('pf-email');
-  const elPfSave  = document.getElementById('pf-save');
-  const elPfLogout= document.getElementById('pf-logout');
-  const elPfMsg   = document.getElementById('pf-msg');
-  const elChatList= document.getElementById('chatlist');
+  const elApp      = document.getElementById('app');
+  const elThread   = document.getElementById('thread');
+  const elInput    = document.getElementById('input');
+  const elSend     = document.getElementById('send');
+  const elAttach   = document.getElementById('attach');
+  const elFile     = document.getElementById('file');
+  const elHint     = document.getElementById('filehint');
+  const elChatList = document.getElementById('chatlist');
 
-  // Prefill profile inputs
-  elPfId.value    = state.userId || '';
-  elPfEmail.value = state.email || '';
+  // Login elements
+  const elLoginSec = document.getElementById('login-section');
+  const elAcctSec  = document.getElementById('account-section');
+  const elLoginUser= document.getElementById('login-username');
+  const elLoginPass= document.getElementById('login-password');
+  const elLoginBtn = document.getElementById('login-btn');
+  const elLoginMsg = document.getElementById('login-msg');
+  const elAcctLine = document.getElementById('acct-line');
+  const elLogoutBtn= document.getElementById('logout-btn');
+  const elNewChat  = document.getElementById('btn-newchat');
 
-  function now(){ return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) }
+  // Sidebar toggle
+  const elToggle   = document.getElementById('toggle-rail');
 
-  function addMessage(role, html){
-    const wrap = document.createElement('div');
-    wrap.className = 'msg ' + (role === 'user' ? 'user' : 'advisor');
-    const meta = `<div class="meta">${role==='user'?'You':'Advisor'} · ${now()}</div>`;
-    wrap.innerHTML = meta + `<div class="bubble">${html}</div>`;
-    elThread.appendChild(wrap);
-    elThread.scrollTop = elThread.scrollHeight;
+  function applySidebar(){
+    if (state.sidebarCollapsed) elApp.classList.add('collapsed'); else elApp.classList.remove('collapsed');
+    localStorage.setItem('sidebarCollapsed', state.sidebarCollapsed ? '1' : '0');
+  }
+
+  function showLoggedIn(){
+    elLoginSec.style.display = 'none';
+    elAcctSec.style.display  = 'block';
+    elAcctLine.textContent   = `Logged in as ${state.username}`;
+  }
+  function showLoggedOut(){
+    elLoginSec.style.display = 'block';
+    elAcctSec.style.display  = 'none';
+    currentChatId = null;
+    elChatList.innerHTML = '';
+    elThread.innerHTML = '<div class="msg advisor"><div class="meta">Advisor ·</div><div class="bubble"><p>Please sign in to view your chats.</p></div></div>';
   }
 
   // ====== Formatting helpers ======
+  function now(){ return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) }
+  function addMessage(role, html){
+    const wrap = document.createElement('div');
+    wrap.className = 'msg ' + (role === 'user' ? 'user' : 'advisor');
+    wrap.innerHTML = `<div class="meta">${role==='user'?'You':'Advisor'} · ${now()}</div><div class="bubble">${html}</div>`;
+    elThread.appendChild(wrap); elThread.scrollTop = elThread.scrollHeight;
+  }
   function mdToHtml(md){
     if(!md) return '';
-    if (/<\\w+[^>]*>/.test(md)) return md;
+    if (/<\w+[^>]*>/.test(md)) return md;
     let h = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    h = h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+    h = h.replace(/```([\s\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
     h = h.replace(/`([^`]+?)`/g,'<code>$1</code>');
-    h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>').replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>').replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
-    h = h.replace(/^>\\s?(.*)$/gm, '<blockquote>$1</blockquote>');
-    h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>').replace(/__(.+?)__/g,'<strong>$1</strong>').replace(/\\*(?!\\s)(.+?)\\*/g,'<em>$1</em>').replace(/_(?!\\s)(.+?)_/g,'<em>$1</em>');
-    h = h.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
-    h = h.replace(/(^|\\s)(https?:\\/\\/[^\\s<]+)(?=\\s|$)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
-    h = h.replace(/(?:^|\\n)(\\d+)\\.\\s+(.+)(?:(?=\\n\\d+\\.\\s)|$)/gms,(m)=>{const items=m.trim().split(/\\n(?=\\d+\\.\\s)/).map(it=>it.replace(/^\\d+\\.\\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ol>${items}</ol>`;});
-    h = h.replace(/(?:^|\\n)[*-]\\s+(.+)(?:(?=\\n[*-]\\s)|$)/gms,(m)=>{const items=m.trim().split(/\\n(?=[*-]\\s)/).map(it=>it.replace(/^[*-]\\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ul>${items}</ul>`;});
-    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
+    h = h.replace(/^######\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\s+(.*)$/gm,'<h5>$1</h5>').replace(/^####\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\s+(.*)$/gm,'<h3>$1</h3>').replace(/^##\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\s+(.*)$/gm,'<h1>$1</h1>');
+    h = h.replace(/^>\s?(.*)$/gm, '<blockquote>$1</blockquote>');
+    h = h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/__(.+?)__/g,'<strong>$1</strong>').replace(/\*(?!\s)(.+?)\*/g,'<em>$1</em>').replace(/_(?!\s)(.+?)_/g,'<em>$1</em>');
+    h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+    h = h.replace(/(^|\s)(https?:\/\/[^\s<]+)(?=\s|$)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    h = h.replace(/(?:^|\n)(\d+)\.\s+(.+)(?:(?=\n\d+\.\s)|$)/gms,(m)=>{const items=m.trim().split(/\n(?=\d+\.\s)/).map(it=>it.replace(/^\d+\.\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ol>${items}</ol>`;});
+    h = h.replace(/(?:^|\n)[*-]\s+(.+)(?:(?=\n[*-]\s)|$)/gms,(m)=>{const items=m.trim().split(/\n(?=[*-]\s)/).map(it=>it.replace(/^[*-]\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ul>${items}</ul>`;});
+    h = h.replace(/\n{2,}/g,'</p><p>').replace(/^(?!<h\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
     return h;
   }
   function applyInlineFormatting(html){
     if(!html) return ''; let out=String(html); const slots=[];
-    function protect(tag){ const re=new RegExp(`<${tag}\\\\b[^>]*>[\\\\s\\\\S]*?<\\\\/${tag}>`,'gi'); out=out.replace(re,m=>{const key=`__SLOT_${tag.toUpperCase()}_${slots.length}__`; slots.push({key,val:m}); return key;});}
+    function protect(tag){ const re=new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`,'gi'); out=out.replace(re,m=>{const key=`__SLOT_${tag.toUpperCase()}_${slots.length}__`; slots.push({key,val:m}); return key;});}
     protect('code'); protect('pre'); protect('a');
-    out = out.replace(/\\*\\*([^*]+?)\\*\\*/g,'<strong>$1</strong>')
+    out = out.replace(/\*\*([^*]+?)\*\*/g,'<strong>$1</strong>')
              .replace(/__([^_]+?)__/g,'<strong>$1</strong>')
-             .replace(/(^|[^*])\\*([^*\\n]+?)\\*/g,'$1<em>$2</em>')
-             .replace(/(^|[^_])_([^_\\n]+?)_/g,'$1<em>$2</em>');
+             .replace(/(^|[^*])\*([^*\n]+?)\*/g,'$1<em>$2</em>')
+             .replace(/(^|[^_])_([^_\n]+?)_/g,'$1<em>$2</em>');
     for(const {key,val} of slots) out=out.replace(key, val);
     return out;
   }
   function normalizeTrustDoc(html){
     let out=html;
-    out=out.replace(/<p>\\s*<strong>\\s*([A-Z0-9][A-Z0-9\\s\\-&,.'()]+?)\\s*<\\/strong>\\s*<\\/p>/g,'<h2>$1</h2><p></p>');
-    const map=[{re:/<strong>\\s*TRUST\\s*NAME\\s*:\\s*<\\/strong>/gi,rep:'Trust: '},{re:/<strong>\\s*DATE\\s*:\\s*<\\/strong>/gi,rep:'Date: '},{re:/<strong>\\s*TAX\\s*YEAR\\s*:\\s*<\\/strong>/gi,rep:'Tax Year: '},{re:/<strong>\\s*TRUSTEE\\(S\\)\\s*:\\s*<\\/strong>/gi,rep:'Trustee(s): '},{re:/<strong>\\s*LOCATION\\s*:\\s*<\\/strong>/gi,rep:'Location: '}];
+    out=out.replace(/<p>\s*<strong>\s*([A-Z0-9][A-Z0-9\s\-&,.'()]+?)\s*<\/strong>\s*<\/p>/g,'<h2>$1</h2><p></p>');
+    const map=[{re:/<strong>\s*TRUST\s*NAME\s*:\s*<\/strong>/gi,rep:'Trust: '},{re:/<strong>\s*DATE\s*:\s*<\/strong>/gi,rep:'Date: '},{re:/<strong>\s*TAX\s*YEAR\s*:\s*<\/strong>/gi,rep:'Tax Year: '},{re:/<strong>\s*TRUSTEE\(S\)\s*:\s*<\/strong>/gi,rep:'Trustee(s): '},{re:/<strong>\s*LOCATION\s*:\s*<\/strong>/gi,rep:'Location: '}];
     map.forEach(({re,rep})=>{ out=out.replace(re,rep) });
-    out=out.replace(/<strong>\\s*([A-Za-z][A-Za-z()\\s]+:)\\s*<\\/strong>\\s*/g,'$1 ');
-    out=out.replace(/\\*\\*\\s*TRUST\\s*NAME\\s*:\\s*\\*\\*/gi,'Trust: ').replace(/\\*\\*\\s*DATE\\s*:\\s*\\*\\*/gi,'Date: ').replace(/\\*\\*\\s*TAX\\s*YEAR\\s*:\\s*\\*\\*/gi,'Tax Year: ').replace(/\\*\\*\\s*TRUSTEE\\(S\\)\\s*:\\s*\\*\\*/gi,'Trustee(s): ').replace(/\\*\\*\\s*LOCATION\\s*:\\s*\\*\\*/gi,'Location: ');
+    out=out.replace(/<strong>\s*([A-Za-z][A-Za-z()\s]+:)\s*<\/strong>\s*/g,'$1 ');
+    out=out.replace(/\*\*\s*TRUST\s*NAME\s*:\s*\*\*/gi,'Trust: ').replace(/\*\*\s*DATE\s*:\s*\*\*/gi,'Date: ').replace(/\*\*\s*TAX\s*YEAR\s*:\s*\*\*/gi,'Tax Year: ').replace(/\*\*\s*TRUSTEE\(S\)\s*:\s*\*\*/gi,'Trustee(s): ').replace(/\*\*\s*LOCATION\s*:\s*\*\*/gi,'Location: ');
     return out;
   }
 
@@ -589,37 +667,55 @@ WIDGET_HTML = """<!doctype html>
     if(!r.ok) throw new Error(url+': '+r.status);
     return r.json();
   }
+  async function postJson(url, obj){
+    const r = await fetch(url, {method:'POST', headers: {'Content-Type':'application/json', ...hdrs()}, body: JSON.stringify(obj)});
+    if(!r.ok) throw new Error(url+': '+r.status);
+    return r.json();
+  }
   async function del(url){
     const r = await fetch(url, {method:'DELETE', headers: hdrs()});
     if(!r.ok) throw new Error(url+': '+r.status);
     return r.json();
   }
 
-  // ====== Profile save / logout ======
-  document.getElementById('pf-save').addEventListener('click', ()=>{
-    const uid = elPfId.value.trim();
-    const em  = elPfEmail.value.trim();
-    if(!uid){ elPfMsg.textContent='Client ID is required.'; return; }
-    state.userId = uid; state.email = em;
-    localStorage.setItem('userId', uid);
-    localStorage.setItem('email', em);
-    elPfMsg.textContent = 'Saved. Loading your chats…';
-    currentChatId = null;
-    elThread.innerHTML = '';
-    loadChats();
+  // ====== Sidebar toggle ======
+  document.getElementById('toggle-rail').addEventListener('click', ()=>{
+    state.sidebarCollapsed = !state.sidebarCollapsed;
+    applySidebar();
   });
 
-  document.getElementById('pf-logout').addEventListener('click', ()=>{
+  // ====== Login / Logout ======
+  function afterLogin(res){
+    state.userId   = res.user_id;
+    state.username = res.username || res.user_id;
+    localStorage.setItem('userId', state.userId);
+    localStorage.setItem('username', state.username);
+    showLoggedIn();
+    loadChats();
+    elLoginMsg.textContent = '';
+  }
+
+  document.getElementById('login-btn').addEventListener('click', async ()=>{
+    const u = elLoginUser.value.trim();
+    const p = elLoginPass.value.trim();
+    if(!u || !p){ elLoginMsg.textContent = 'Username and password are required.'; return; }
+    try{
+      const fd = new FormData();
+      fd.append('username', u);
+      fd.append('password', p);
+      const res = await postForm('/auth/login', fd);
+      afterLogin(res);
+    }catch(e){
+      elLoginMsg.textContent = 'Login failed.';
+    }
+  });
+
+  document.getElementById('logout-btn').addEventListener('click', async ()=>{
+    try{ await postForm('/auth/logout', new FormData()); }catch(_){}
     localStorage.removeItem('userId');
-    localStorage.removeItem('email');
-    state.userId = '';
-    state.email  = '';
-    elPfId.value = '';
-    elPfEmail.value = '';
-    elPfMsg.textContent = 'Logged out. Enter Client ID to log in.';
-    currentChatId = null;
-    elChatList.innerHTML = '';
-    elThread.innerHTML = '<div class="msg advisor"><div class="meta">Advisor ·</div><div class="bubble"><p>Please sign in with your Client ID to view your chats.</p></div></div>';
+    localStorage.removeItem('username');
+    state.userId = ''; state.username = '';
+    showLoggedOut();
   });
 
   // ====== Chat list / tabs, rename, delete ======
@@ -659,8 +755,7 @@ WIDGET_HTML = """<!doctype html>
           e.stopPropagation();
           const newTitle = prompt('New chat title:', ch.title || '');
           if(newTitle !== null){
-            const fd = new FormData();
-            fd.append('title', newTitle);
+            const fd = new FormData(); fd.append('title', newTitle);
             try { await postForm(`/chats/${ch.id}/title`, fd); loadChats(); }
             catch(err){ alert('Rename failed: '+err); }
           }
@@ -689,7 +784,6 @@ WIDGET_HTML = """<!doctype html>
         currentChatId = data.items[0].id;
         openChat(currentChatId);
       }
-      elPfMsg.textContent = '';
     }catch(e){
       elChatList.innerHTML = '<div class="label">Failed to load chats.</div>';
     }
@@ -712,8 +806,8 @@ WIDGET_HTML = """<!doctype html>
   }
 
   // New chat
-  document.getElementById('btn-newchat').addEventListener('click', async ()=>{
-    if(!state.userId){ elPfMsg.textContent='Please enter Client ID and Save first.'; return; }
+  elNewChat.addEventListener('click', async ()=>{
+    if(!state.userId){ alert('Please log in first.'); return; }
     try{
       const res  = await postForm('/chats', new FormData());
       currentChatId = res.chat_id;
@@ -729,7 +823,7 @@ WIDGET_HTML = """<!doctype html>
   function readInput(){
     const tmp = elInput.cloneNode(true);
     tmp.querySelectorAll('div').forEach(d=>{ if (d.innerHTML === "<br>") d.innerHTML = "\\n"; });
-    return tmp.innerText.replace(/\\u00A0/g,' ').trim();
+    return tmp.innerText.replace(/\u00A0/g,' ').trim();
   }
 
   async function callRag(q, chatId){
@@ -753,9 +847,9 @@ WIDGET_HTML = """<!doctype html>
   }
 
   async function handleSend(q){
-    if(!state.userId){ elPfMsg.textContent='Please enter Client ID and Save first.'; return; }
+    if(!state.userId){ alert('Please log in first.'); return; }
     if(!q) return;
-    addMessage('user', q.replace(/\\n/g,'<br>'));
+    addMessage('user', q.replace(/\n/g,'<br>'));
 
     // auto-title current chat with first message if unnamed
     if (currentChatId) {
@@ -775,10 +869,10 @@ WIDGET_HTML = """<!doctype html>
       loadChats(); // refresh list order
 
       let html = (data && data.answer) ? data.answer : '';
-      const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
-      let rendered = looksHtml ? html : mdToHtml(String(html||''));
-      rendered = applyInlineFormatting(rendered);
-      rendered = normalizeTrustDoc(rendered);
+      const looksHtml = typeof html==='string' && /<\w+[^>]*>/.test(html);
+      let rendered = looksHtml ? html : mdToHtml(String(html||''));  // convert if Markdown
+      rendered = applyInlineFormatting(rendered);                     // ensure **bold** → <strong>
+      rendered = normalizeTrustDoc(rendered);                         // colon label style
 
       work.querySelector('.meta').textContent = 'Advisor · ' + now();
       work.querySelector('.bubble').outerHTML = `<div class="bubble">${rendered}</div>`;
@@ -813,12 +907,10 @@ WIDGET_HTML = """<!doctype html>
     }
   });
 
-  // Initial load (if user was remembered)
-  if (state.userId) {
-    loadChats();
-  } else {
-    elThread.innerHTML = '<div class="msg advisor"><div class="meta">Advisor ·</div><div class="bubble"><p>Welcome. Enter your Client ID on the left and click “Save” to begin.</p></div></div>';
-  }
+  // Initial load
+  applySidebar();
+  if (state.userId) { showLoggedIn(); loadChats(); }
+  else { showLoggedOut(); }
 </script>
 </body>
 </html>
