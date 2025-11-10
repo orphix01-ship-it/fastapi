@@ -372,7 +372,7 @@ def delete_chat(chat_id: str, user_id: str = Depends(get_current_user)):
     conn.close()
     return {"ok": True}
 
-# ========== WIDGET (Sidebar with Profile + Chat Tabs, rename, logout) ==========
+# ========== WIDGET (Sidebar + Chat + Conversation Tree) ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -389,10 +389,17 @@ WIDGET_HTML = """<!doctype html>
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--font)}
-  .app{display:grid; grid-template-columns: 280px 1fr; height:100vh}
-  .rail{border-right:1px solid var(--border); background:var(--rail); display:flex; flex-direction:column}
+  /* Three-pane layout: [Left Rail] | [Main] | [Right Tree] */
+  .app{display:grid; grid-template-columns: 280px 1fr 320px; height:100vh; position:relative}
+  .rail{border-right:1px solid var(--border); background:var(--rail); display:flex; flex-direction:column; position:relative; transition:width .18s ease-in-out}
+  .rail.collapsed{width:0; min-width:0; overflow:hidden; border-right:none}
+  /* Always-visible reopen tab / logo on left edge */
+  .left-tab{position:fixed; left:0; top:12px; width:12px; height:48px; border:1px solid var(--border); border-left:none; border-radius:0 10px 10px 0; background:#fff; box-shadow:var(--shadow); display:flex; align-items:center; justify-content:center; cursor:pointer; z-index:30}
+  .left-tab .bar{width:2px; height:22px; background:#000; border-radius:2px}
   .brand{padding:14px 16px; text-align:center; border-bottom:1px solid var(--border)}
   .brand .title{font-family:var(--title); font-weight:300; font-size:18px}
+  .brand-row{display:flex; align-items:center; justify-content:space-between}
+  .brand-btn{cursor:pointer; border:1px solid var(--border); background:#fff; color:#000; padding:6px 10px; border-radius:10px}
   .section{padding:12px; border-bottom:1px solid var(--border)}
   .label{font-size:12px; color:#6b7280; margin-bottom:6px}
   .row{display:flex; gap:6px}
@@ -429,20 +436,46 @@ WIDGET_HTML = """<!doctype html>
   .bubble pre{background:#fff;color:#000;border:1px solid var(--border);padding:12px;border-radius:12px;overflow:auto}
   .bubble blockquote{border-left:3px solid #000;padding:6px 12px;margin:8px 0;background:#fafafa}
 
-  .composer{position:fixed; left:280px; right:0; bottom:0; background:#fff; padding:18px 12px; border-top:none}
+  /* Composer offsets adapt to sidebar/tree state */
+  .composer{position:fixed; left:280px; right:320px; bottom:0; background:#fff; padding:18px 12px; border-top:none; transition:left .18s ease-in-out, right .18s ease-in-out}
+  body.sidebar-closed .composer{left:0}
+  body.tree-closed .composer{right:0}
   .bar{display:flex; align-items:flex-end; gap:8px; background:#fff; border:1px solid var(--ring); border-radius:22px; padding:8px; box-shadow:var(--shadow); max-width:900px; margin:0 auto}
   .cin{flex:1; min-height:24px; max-height:160px; overflow:auto; outline:none; padding:8px 10px; font:16px/1.5 var(--font); color:#000}
   .cin:empty:before{content:attr(data-placeholder); color:#000}
   .iconbtn{cursor:pointer; border:1px solid var(--border); background:#fff; color:#000; padding:8px 10px; border-radius:12px}
   .send{border:1px solid #000; background:#000; color:#fff; border-radius:12px; padding:8px 12px}
   #file{display:none}
+
+  /* Right-side Conversation Tree panel */
+  .tree{border-left:1px solid var(--border); background:#fff; display:flex; flex-direction:column; overflow:hidden}
+  .tree.collapsed{width:0; min-width:0; border-left:none}
+  .tree-head{display:flex; align-items:center; justify-content:space-between; padding:12px 12px; border-bottom:1px solid var(--border)}
+  .tree-title{font-weight:600}
+  .tree-body{flex:1; overflow:auto; padding:10px}
+  .tree-actions{display:flex; gap:6px}
+  .tree-item{padding:6px 8px; border-radius:8px; cursor:pointer}
+  .tree-item:hover{background:#fafafa}
+  .tree-item.active{outline:2px solid #000}
+  .node-row{display:flex; align-items:center; gap:6px}
+  .node-actions{display:flex; gap:6px; margin-left:auto}
+  .indent-0{margin-left:0}
+  .indent-1{margin-left:12px}
+  .indent-2{margin-left:24px}
+  .indent-3{margin-left:36px}
+  .indent-4{margin-left:48px}
 </style>
 </head>
 <body>
   <div class="app">
     <!-- Left rail -->
-    <aside class="rail">
-      <div class="brand"><div class="title">Private Trust Fiduciary Advisor</div></div>
+    <aside class="rail" id="rail">
+      <div class="brand">
+        <div class="brand-row">
+          <div class="title">Private Trust Fiduciary Advisor</div>
+          <button id="btn-rail-collapse" class="brand-btn" title="Collapse sidebar" aria-label="Collapse sidebar">⟨⟨</button>
+        </div>
+      </div>
 
       <div class="section">
         <div class="label">Profile</div>
@@ -479,7 +512,27 @@ WIDGET_HTML = """<!doctype html>
         </div>
       </div>
     </main>
+
+    <!-- Right-hand Conversation Tree -->
+    <aside class="tree" id="treePane" aria-label="Conversation Tree" role="complementary">
+      <div class="tree-head">
+        <div class="tree-title">Conversation Tree</div>
+        <div class="tree-actions">
+          <button id="btn-tree-toggle" class="btn" title="Collapse tree" aria-label="Collapse tree">⟩⟩</button>
+          <button id="btn-new-root" class="btn primary" title="New root">New Root</button>
+        </div>
+      </div>
+      <div class="tree-body">
+        <div class="label" style="margin-bottom:6px">Roots</div>
+        <div id="roots" style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px"></div>
+        <div class="label" style="margin-top:8px">Nodes</div>
+        <div id="treeList"></div>
+      </div>
+    </aside>
   </div>
+
+  <!-- Always-visible left reopen tab -->
+  <button id="left-tab" class="left-tab" title="Open sidebar" aria-label="Open sidebar"><span class="bar"></span></button>
 
   <!-- Composer -->
   <div class="composer">
@@ -499,12 +552,111 @@ WIDGET_HTML = """<!doctype html>
   </div>
 
 <script>
+  // === UI persistent state (sidebar + tree) ===
+  const UIKEY = 'ui.layout.v1';
+  const ui = (() => {
+    const def = { sidebarOpen: true, treeOpen: true };
+    try { return Object.assign(def, JSON.parse(localStorage.getItem(UIKEY) || '{}')); }
+    catch(_){ return def; }
+  })();
+  function saveUI(){ localStorage.setItem(UIKEY, JSON.stringify(ui)); }
+  function applyLayout(){
+    const rail = document.getElementById('rail');
+    const tree = document.getElementById('treePane');
+    const body = document.body;
+    if (rail){
+      rail.classList.toggle('collapsed', !ui.sidebarOpen);
+      body.classList.toggle('sidebar-closed', !ui.sidebarOpen);
+    }
+    if (tree){
+      tree.classList.toggle('collapsed', !ui.treeOpen);
+      body.classList.toggle('tree-closed', !ui.treeOpen);
+    }
+  }
+  document.addEventListener('click', (e)=>{
+    if (e.target && e.target.id === 'btn-rail-collapse'){
+      ui.sidebarOpen = false; saveUI(); applyLayout();
+    }
+    if (e.target && e.target.id === 'left-tab'){
+      ui.sidebarOpen = true; saveUI(); applyLayout();
+    }
+    if (e.target && e.target.id === 'btn-tree-toggle'){
+      ui.treeOpen = !ui.treeOpen; saveUI(); applyLayout();
+    }
+  });
+
   // ====== State ======
   let currentChatId = null;
   let state = {
     userId: localStorage.getItem('userId') || '',
     email:  localStorage.getItem('email')  || ''
   };
+
+  // ====== Conversation Tree Model ======
+  const TREEKEY = 'conversation.tree.v1';
+  const uuidv4 = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random()*16|0, v = c === 'x' ? r : (r&0x3|0x8); return v.toString(16);
+  });
+
+  /**
+   * @typedef {{ id: string, rootId: string, parentId: (string|null), role: 'user'|'assistant'|'system', content: string, createdAt: string, children: string[], meta?: { title?: string, tags?: string[], chatId?: string } }} MessageNode
+   * @typedef {{ id: string, title: string, createdAt: string, firstNodeId: (string|null) }} ConversationRoot
+   * @typedef {{ roots: string[], nodesById: Record<string,MessageNode>, rootsById: Record<string,ConversationRoot>, currentRootId: (string|null), currentNodeId: (string|null) }} TreeIndex
+   */
+
+  /** @type {TreeIndex} */
+  let tree = (() => {
+    try{
+      const t = JSON.parse(localStorage.getItem(TREEKEY) || '{}');
+      if (t && t.roots && t.nodesById && t.rootsById) return t;
+    }catch(_){}
+    return { roots: [], nodesById: {}, rootsById: {}, currentRootId: null, currentNodeId: null };
+  })();
+
+  function saveTree(){ localStorage.setItem(TREEKEY, JSON.stringify(tree)); }
+  function newRoot(title){
+    const id = uuidv4();
+    tree.rootsById[id] = { id, title: title || 'Untitled Root', createdAt: new Date().toISOString(), firstNodeId: null };
+    tree.roots.unshift(id);
+    tree.currentRootId = id;
+    tree.currentNodeId = null;
+    saveTree(); renderTree();
+    return id;
+  }
+  function newNode({rootId, parentId=null, role='user', content='', title}){
+    const id = uuidv4();
+    const node = {
+      id, rootId, parentId, role, content,
+      createdAt: new Date().toISOString(), children: [],
+      meta: { title: title || undefined }
+    };
+    tree.nodesById[id] = node;
+    if (parentId){ tree.nodesById[parentId].children.push(id); }
+    const r = tree.rootsById[rootId];
+    if (!r.firstNodeId) r.firstNodeId = id;
+    tree.currentNodeId = id;
+    saveTree(); renderTree();
+    return id;
+  }
+  function selectRoot(rootId){
+    tree.currentRootId = rootId; saveTree(); renderTree();
+  }
+  function selectNode(nodeId){
+    tree.currentNodeId = nodeId; saveTree(); renderTree();
+    const node = tree.nodesById[nodeId];
+    if (node && node.meta && node.meta.chatId){ openChat(node.meta.chatId); }
+  }
+  function branchFrom(nodeId, title){
+    const parent = tree.nodesById[nodeId]; if (!parent) return null;
+    return newNode({ rootId: parent.rootId, parentId: parent.id, role:'user', content:'', title: title || 'New branch' });
+  }
+  function setNodeChat(nodeId, chatId){
+    const n = tree.nodesById[nodeId]; if (!n) return;
+    n.meta = n.meta || {}; n.meta.chatId = chatId; saveTree();
+  }
+  function labelFor(node){
+    return (node.meta && node.meta.title) || (node.content ? node.content.slice(0,80) : (node.role === 'assistant' ? 'Assistant' : 'User'));
+  }
 
   // ====== Elements ======
   const elThread  = document.getElementById('thread');
@@ -519,6 +671,8 @@ WIDGET_HTML = """<!doctype html>
   const elPfLogout= document.getElementById('pf-logout');
   const elPfMsg   = document.getElementById('pf-msg');
   const elChatList= document.getElementById('chatlist');
+  const elRoots   = document.getElementById('roots');
+  const elTreeList= document.getElementById('treeList');
 
   // Prefill profile inputs
   elPfId.value    = state.userId || '';
@@ -533,6 +687,56 @@ WIDGET_HTML = """<!doctype html>
     wrap.innerHTML = meta + `<div class="bubble">${html}</div>`;
     elThread.appendChild(wrap);
     elThread.scrollTop = elThread.scrollHeight;
+  }
+
+  // ====== Tree Rendering ======
+  function renderTree(){
+    // Roots
+    if (elRoots){
+      elRoots.innerHTML = '';
+      (tree.roots || []).forEach(rid=>{
+        const r = tree.rootsById[rid];
+        const b = document.createElement('button');
+        b.className = 'btn' + (tree.currentRootId === rid ? ' primary' : '');
+        b.textContent = r.title || 'Untitled Root';
+        b.title = 'Select root';
+        b.addEventListener('click', ()=> selectRoot(rid));
+        elRoots.appendChild(b);
+      });
+    }
+    // Nodes
+    if (!tree.currentRootId){ elTreeList.innerHTML = '<div class="label">No root selected.</div>'; return; }
+    const rootId = tree.currentRootId;
+    const build = (id, depth) => {
+      const node = tree.nodesById[id]; if (!node) return [];
+      const row = document.createElement('div');
+      row.className = 'tree-item ' + (tree.currentNodeId===id ? 'active' : '');
+      row.innerHTML = `<div class="node-row indent-${Math.min(depth,4)}">
+        <span>${labelFor(node)}</span>
+        <div class="node-actions">
+          <button class="btn" data-act="open" data-id="${id}">Open</button>
+          <button class="btn" data-act="branch" data-id="${id}">Branch</button>
+        </div>
+      </div>`;
+      row.querySelector('[data-act="open"]').addEventListener('click', (e)=>{ e.stopPropagation(); selectNode(id); });
+      row.querySelector('[data-act="branch"]').addEventListener('click', (e)=>{
+        e.stopPropagation();
+        const title = prompt('Branch title? (optional)') || 'New branch';
+        const cid = branchFrom(id, title);
+        if (cid) selectNode(cid);
+      });
+      row.addEventListener('click', ()=> selectNode(id));
+      const out = [row];
+      (node.children || []).forEach(childId => { out.push(...build(childId, depth+1)); });
+      return out;
+    };
+    const top = [];
+    Object.values(tree.nodesById).forEach(n=>{
+      if (n.rootId === rootId && !n.parentId) top.push(n.id);
+    });
+    top.sort((a,b)=> new Date(tree.nodesById[a].createdAt) - new Date(tree.nodesById[b].createdAt));
+    elTreeList.innerHTML = '';
+    top.forEach(tid => build(tid, 0).forEach(el => elTreeList.appendChild(el)));
   }
 
   // ====== Formatting helpers ======
@@ -756,6 +960,23 @@ WIDGET_HTML = """<!doctype html>
     if(!state.userId){ elPfMsg.textContent='Please enter Client ID and Save first.'; return; }
     if(!q) return;
     addMessage('user', q.replace(/\\n/g,'<br>'));
+    // === Conversation Tree integration (ensure root/node, then append user node) ===
+    if (!tree.currentRootId){
+      // auto-create a default root on first send if none exists
+      newRoot('General');
+    }
+    // If there's no active node, start a new top-level node with this prompt
+    if (!tree.currentNodeId){
+      newNode({ rootId: tree.currentRootId, parentId: null, role: 'user', content: q, title: q.slice(0,80) });
+    } else {
+      // If active node exists, branch under it for this new prompt
+      const branchedId = branchFrom(tree.currentNodeId, q.slice(0,80));
+      if (branchedId){
+        const n = tree.nodesById[branchedId];
+        n.content = q; saveTree(); renderTree();
+      }
+    }
+    const pendingNodeId = tree.currentNodeId;
 
     // auto-title current chat with first message if unnamed
     if (currentChatId) {
@@ -773,6 +994,8 @@ WIDGET_HTML = """<!doctype html>
       const data  = files.length ? await callReview(q, files, currentChatId) : await callRag(q, currentChatId);
       if (data && data.chat_id) currentChatId = data.chat_id;
       loadChats(); // refresh list order
+      // Link active tree node with this chatId
+      if (pendingNodeId && currentChatId){ setNodeChat(pendingNodeId, currentChatId); }
 
       let html = (data && data.answer) ? data.answer : '';
       const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
@@ -812,6 +1035,10 @@ WIDGET_HTML = """<!doctype html>
       elHint.textContent = 'State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.';
     }
   });
+
+  // Apply initial layout + render tree once
+  applyLayout();
+  renderTree();
 
   // Initial load (if user was remembered)
   if (state.userId) {
