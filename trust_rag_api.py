@@ -142,13 +142,13 @@ def get_user(conn, username: str):
     return conn.execute("SELECT id, email, name, role, settings_json FROM users WHERE id=?", (username,)).fetchone()
 
 def upsert_user(conn, username: str, email: str, password: str):
-    # WARNING: demo only (plaintext password). Replace with hashed passwords for production.
     now = iso_now()
     row = get_user(conn, username)
+    settings = {"password": password}  # WARNING: plaintext; replace with hashing for production
     if row:
-        conn.execute("UPDATE users SET email=?, last_login_at=? WHERE id=?", (email or None, now, username))
+        conn.execute("UPDATE users SET email=?, settings_json=?, last_login_at=? WHERE id=?",
+                     (email or None, json.dumps(settings), now, username))
     else:
-        settings = {"password": password}
         conn.execute(
             "INSERT INTO users (id, email, name, role, settings_json, created_at, last_login_at) VALUES (?,?,?,?,?,?,?)",
             (username, email or None, username, "client", json.dumps(settings), now, now)
@@ -223,12 +223,6 @@ def _titles_only(uniq_sources: List[Dict[str, Any]]) -> List[str]:
 
 # ========== SYNTHESIS ==========
 def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets: List[str]) -> str:
-    """
-    Synthesizes a clean HTML answer using a system message that enforces:
-    - HTML-only output (no markdown asterisks)
-    - Proper tags for bold/italic/headings/lists/links
-    - Professional legal formatting
-    """
     if not snippets and not uniq_sources:
         return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
 
@@ -392,11 +386,7 @@ def delete_chat(chat_id: str, user_id: str = Depends(get_current_user)):
 
 # ---- Simple login/logout endpoints (demo only) ----
 @app.post("/auth/login")
-def auth_login(
-    username: str = Form(...),
-    password: str = Form(...),
-    email: str = Form(None),
-):
+def auth_login(username: str = Form(...), password: str = Form(...), email: str = Form(None)):
     if not username or not password:
         raise HTTPException(400, "username and password are required")
     conn = db()
@@ -410,7 +400,7 @@ def auth_login(
 def auth_logout():
     return {"ok": True}
 
-# ========== WIDGET (Sidebar with collapse toggle, Login, Chats, rename, logout) ==========
+# ========== WIDGET ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -497,7 +487,7 @@ WIDGET_HTML = """<!doctype html>
         </div>
       </div>
 
-      <!-- Login (when logged out) -->
+      <!-- Login -->
       <div class="section" id="login-section">
         <div class="label">Sign in</div>
         <div class="row" style="margin-bottom:6px">
@@ -507,18 +497,18 @@ WIDGET_HTML = """<!doctype html>
           <input id="login-password" class="input" placeholder="Password (required)" type="password"/>
         </div>
         <div class="row" style="gap:8px; margin-top:8px">
-          <button id="login-btn" class="btn primary">Log in</button>
+          <button id="login-btn" class="btn primary" type="button">Log in</button>
         </div>
         <div id="login-msg" class="label" style="margin-top:6px;"></div>
       </div>
 
-      <!-- Account (when logged in) -->
+      <!-- Account -->
       <div class="section" id="account-section" style="display:none">
         <div class="label">Account</div>
         <div id="acct-line" style="margin-bottom:8px; font-size:14px;"></div>
         <div class="row" style="gap:8px; margin-top:8px">
-          <button id="btn-newchat" class="btn primary">New Chat</button>
-          <button id="logout-btn" class="btn">Log out</button>
+          <button id="btn-newchat" class="btn primary" type="button">New Chat</button>
+          <button id="logout-btn" class="btn" type="button">Log out</button>
         </div>
       </div>
 
@@ -543,8 +533,8 @@ WIDGET_HTML = """<!doctype html>
     <div class="bar">
       <input id="file" type="file" multiple accept=".pdf,.txt,.docx"/>
       <div id="input" class="cin" contenteditable="true" data-placeholder="Message the Advisor… (Shift+Enter for newline)"></div>
-      <button id="attach" class="iconbtn" title="Add files">+</button>
-      <button id="send" class="send" title="Send" aria-label="Send">
+      <button id="attach" class="iconbtn" title="Add files" type="button">+</button>
+      <button id="send" class="send" title="Send" aria-label="Send" type="button">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <path d="m5 12 14-7-4 14-3-5-7-2z" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
@@ -553,9 +543,16 @@ WIDGET_HTML = """<!doctype html>
     <div id="filehint" style="max-width:900px; margin:8px auto 0; color:#000; font-size:12px;">
       State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.
     </div>
+    <div id="errhint" style="max-width:900px; margin:6px auto 0; color:#b91c1c; font-size:12px;"></div>
   </div>
 
 <script>
+  // ====== Global error banner so you see issues if buttons fail ======
+  window.addEventListener('error', (e)=>{
+    const el = document.getElementById('errhint');
+    if (el) el.textContent = 'Script error: ' + (e && e.message ? e.message : String(e));
+  });
+
   // ====== State ======
   let currentChatId = null;
   let state = {
@@ -572,6 +569,7 @@ WIDGET_HTML = """<!doctype html>
   const elAttach   = document.getElementById('attach');
   const elFile     = document.getElementById('file');
   const elHint     = document.getElementById('filehint');
+  const elErr      = document.getElementById('errhint');
   const elChatList = document.getElementById('chatlist');
 
   // Login elements
@@ -616,38 +614,38 @@ WIDGET_HTML = """<!doctype html>
   }
   function mdToHtml(md){
     if(!md) return '';
-    if (/<\w+[^>]*>/.test(md)) return md;
+    if (/<\\w+[^>]*>/.test(md)) return md;
     let h = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    h = h.replace(/```([\s\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+    h = h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
     h = h.replace(/`([^`]+?)`/g,'<code>$1</code>');
-    h = h.replace(/^######\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\s+(.*)$/gm,'<h5>$1</h5>').replace(/^####\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\s+(.*)$/gm,'<h3>$1</h3>').replace(/^##\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\s+(.*)$/gm,'<h1>$1</h1>');
-    h = h.replace(/^>\s?(.*)$/gm, '<blockquote>$1</blockquote>');
-    h = h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/__(.+?)__/g,'<strong>$1</strong>').replace(/\*(?!\s)(.+?)\*/g,'<em>$1</em>').replace(/_(?!\s)(.+?)_/g,'<em>$1</em>');
-    h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
-    h = h.replace(/(^|\s)(https?:\/\/[^\s<]+)(?=\s|$)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
-    h = h.replace(/(?:^|\n)(\d+)\.\s+(.+)(?:(?=\n\d+\.\s)|$)/gms,(m)=>{const items=m.trim().split(/\n(?=\d+\.\s)/).map(it=>it.replace(/^\d+\.\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ol>${items}</ol>`;});
-    h = h.replace(/(?:^|\n)[*-]\s+(.+)(?:(?=\n[*-]\s)|$)/gms,(m)=>{const items=m.trim().split(/\n(?=[*-]\s)/).map(it=>it.replace(/^[*-]\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ul>${items}</ul>`;});
-    h = h.replace(/\n{2,}/g,'</p><p>').replace(/^(?!<h\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
+    h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>').replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>').replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
+    h = h.replace(/^>\\s?(.*)$/gm, '<blockquote>$1</blockquote>');
+    h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>').replace(/__(.+?)__/g,'<strong>$1</strong>').replace(/\\*(?!\\s)(.+?)\\*/g,'<em>$1</em>').replace(/_(?!\\s)(.+?)_/g,'<em>$1</em>');
+    h = h.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+    h = h.replace(/(^|\\s)(https?:\\/\\/[^\\s<]+)(?=\\s|$)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    h = h.replace(/(?:^|\\n)(\\d+)\\.\\s+(.+)(?:(?=\\n\\d+\\.\\s)|$)/gms,(m)=>{const items=m.trim().split(/\\n(?=\\d+\\.\\s)/).map(it=>it.replace(/^\\d+\\.\\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ol>${items}</ol>`;});
+    h = h.replace(/(?:^|\\n)[*-]\\s+(.+)(?:(?=\\n[*-]\\s)|$)/gms,(m)=>{const items=m.trim().split(/\\n(?=[*-]\\s)/).map(it=>it.replace(/^[*-]\\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ul>${items}</ul>`;});
+    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
     return h;
   }
   function applyInlineFormatting(html){
     if(!html) return ''; let out=String(html); const slots=[];
-    function protect(tag){ const re=new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`,'gi'); out=out.replace(re,m=>{const key=`__SLOT_${tag.toUpperCase()}_${slots.length}__`; slots.push({key,val:m}); return key;});}
+    function protect(tag){ const re=new RegExp(`<${tag}\\\\b[^>]*>[\\\\s\\\\S]*?<\\\\/${tag}>`,'gi'); out=out.replace(re,m=>{const key=`__SLOT_${tag.toUpperCase()}_${slots.length}__`; slots.push({key,val:m}); return key;});}
     protect('code'); protect('pre'); protect('a');
-    out = out.replace(/\*\*([^*]+?)\*\*/g,'<strong>$1</strong>')
+    out = out.replace(/\\*\\*([^*]+?)\\*\\*/g,'<strong>$1</strong>')
              .replace(/__([^_]+?)__/g,'<strong>$1</strong>')
-             .replace(/(^|[^*])\*([^*\n]+?)\*/g,'$1<em>$2</em>')
-             .replace(/(^|[^_])_([^_\n]+?)_/g,'$1<em>$2</em>');
+             .replace(/(^|[^*])\\*([^*\\n]+?)\\*/g,'$1<em>$2</em>')
+             .replace(/(^|[^_])_([^_\\n]+?)_/g,'$1<em>$2</em>');
     for(const {key,val} of slots) out=out.replace(key, val);
     return out;
   }
   function normalizeTrustDoc(html){
     let out=html;
-    out=out.replace(/<p>\s*<strong>\s*([A-Z0-9][A-Z0-9\s\-&,.'()]+?)\s*<\/strong>\s*<\/p>/g,'<h2>$1</h2><p></p>');
-    const map=[{re:/<strong>\s*TRUST\s*NAME\s*:\s*<\/strong>/gi,rep:'Trust: '},{re:/<strong>\s*DATE\s*:\s*<\/strong>/gi,rep:'Date: '},{re:/<strong>\s*TAX\s*YEAR\s*:\s*<\/strong>/gi,rep:'Tax Year: '},{re:/<strong>\s*TRUSTEE\(S\)\s*:\s*<\/strong>/gi,rep:'Trustee(s): '},{re:/<strong>\s*LOCATION\s*:\s*<\/strong>/gi,rep:'Location: '}];
+    out=out.replace(/<p>\\s*<strong>\\s*([A-Z0-9][A-Z0-9\\s\\-&,.'()]+?)\\s*<\\/strong>\\s*<\\/p>/g,'<h2>$1</h2><p></p>');
+    const map=[{re:/<strong>\\s*TRUST\\s*NAME\\s*:\\s*<\\/strong>/gi,rep:'Trust: '},{re:/<strong>\\s*DATE\\s*:\\s*<\\/strong>/gi,rep:'Date: '},{re:/<strong>\\s*TAX\\s*YEAR\\s*:\\s*<\\/strong>/gi,rep:'Tax Year: '},{re:/<strong>\\s*TRUSTEE\\(S\\)\\s*:\\s*<\\/strong>/gi,rep:'Trustee(s): '},{re:/<strong>\\s*LOCATION\\s*:\\s*<\\/strong>/gi,rep:'Location: '}];
     map.forEach(({re,rep})=>{ out=out.replace(re,rep) });
-    out=out.replace(/<strong>\s*([A-Za-z][A-Za-z()\s]+:)\s*<\/strong>\s*/g,'$1 ');
-    out=out.replace(/\*\*\s*TRUST\s*NAME\s*:\s*\*\*/gi,'Trust: ').replace(/\*\*\s*DATE\s*:\s*\*\*/gi,'Date: ').replace(/\*\*\s*TAX\s*YEAR\s*:\s*\*\*/gi,'Tax Year: ').replace(/\*\*\s*TRUSTEE\(S\)\s*:\s*\*\*/gi,'Trustee(s): ').replace(/\*\*\s*LOCATION\s*:\s*\*\*/gi,'Location: ');
+    out=out.replace(/<strong>\\s*([A-Za-z][A-Za-z()\\s]+:)\\s*<\\/strong>\\s*/g,'$1 ');
+    out=out.replace(/\\*\\*\\s*TRUST\\s*NAME\\s*:\\s*\\*\\*/gi,'Trust: ').replace(/\\*\\*\\s*DATE\\s*:\\s*\\*\\*/gi,'Date: ').replace(/\\*\\*\\s*TAX\\s*YEAR\\s*:\\s*\\*\\*/gi,'Tax Year: ').replace(/\\*\\*\\s*TRUSTEE\\(S\\)\\s*:\\s*\\*\\*/gi,'Trustee(s): ').replace(/\\*\\*\\s*LOCATION\\s*:\\s*\\*\\*/gi,'Location: ');
     return out;
   }
 
@@ -707,6 +705,7 @@ WIDGET_HTML = """<!doctype html>
       afterLogin(res);
     }catch(e){
       elLoginMsg.textContent = 'Login failed.';
+      if (elErr) elErr.textContent = 'Login error: ' + (e && e.message ? e.message : String(e));
     }
   });
 
@@ -786,6 +785,7 @@ WIDGET_HTML = """<!doctype html>
       }
     }catch(e){
       elChatList.innerHTML = '<div class="label">Failed to load chats.</div>';
+      if (elErr) elErr.textContent = 'Load chats error: ' + (e && e.message ? e.message : String(e));
     }
   }
 
@@ -802,11 +802,12 @@ WIDGET_HTML = """<!doctype html>
       });
     }catch(e){
       addMessage('advisor', `<p style="color:#b91c1c">Failed to load chat: ${e}</p>`);
+      if (elErr) elErr.textContent = 'Open chat error: ' + (e && e.message ? e.message : String(e));
     }
   }
 
   // New chat
-  elNewChat.addEventListener('click', async ()=>{
+  document.getElementById('btn-newchat').addEventListener('click', async ()=>{
     if(!state.userId){ alert('Please log in first.'); return; }
     try{
       const res  = await postForm('/chats', new FormData());
@@ -816,6 +817,7 @@ WIDGET_HTML = """<!doctype html>
       addMessage('advisor', '<p>New chat created. How may I assist?</p>');
     }catch(e){
       addMessage('advisor', `<p style="color:#b91c1c">Failed to create chat: ${e}</p>`);
+      if (elErr) elErr.textContent = 'New chat error: ' + (e && e.message ? e.message : String(e));
     }
   });
 
@@ -823,7 +825,7 @@ WIDGET_HTML = """<!doctype html>
   function readInput(){
     const tmp = elInput.cloneNode(true);
     tmp.querySelectorAll('div').forEach(d=>{ if (d.innerHTML === "<br>") d.innerHTML = "\\n"; });
-    return tmp.innerText.replace(/\u00A0/g,' ').trim();
+    return tmp.innerText.replace(/\\u00A0/g,' ').trim();
   }
 
   async function callRag(q, chatId){
@@ -849,7 +851,7 @@ WIDGET_HTML = """<!doctype html>
   async function handleSend(q){
     if(!state.userId){ alert('Please log in first.'); return; }
     if(!q) return;
-    addMessage('user', q.replace(/\n/g,'<br>'));
+    addMessage('user', q.replace(/\\n/g,'<br>'));
 
     // auto-title current chat with first message if unnamed
     if (currentChatId) {
@@ -866,19 +868,20 @@ WIDGET_HTML = """<!doctype html>
       const files = Array.from(elFile.files || []);
       const data  = files.length ? await callReview(q, files, currentChatId) : await callRag(q, currentChatId);
       if (data && data.chat_id) currentChatId = data.chat_id;
-      loadChats(); // refresh list order
+      loadChats();
 
       let html = (data && data.answer) ? data.answer : '';
-      const looksHtml = typeof html==='string' && /<\w+[^>]*>/.test(html);
-      let rendered = looksHtml ? html : mdToHtml(String(html||''));  // convert if Markdown
-      rendered = applyInlineFormatting(rendered);                     // ensure **bold** → <strong>
-      rendered = normalizeTrustDoc(rendered);                         // colon label style
+      const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
+      let rendered = looksHtml ? html : mdToHtml(String(html||''));
+      rendered = applyInlineFormatting(rendered);
+      rendered = normalizeTrustDoc(rendered);
 
       work.querySelector('.meta').textContent = 'Advisor · ' + now();
       work.querySelector('.bubble').outerHTML = `<div class="bubble">${rendered}</div>`;
     }catch(e){
       work.querySelector('.meta').textContent = 'Advisor · error';
       work.querySelector('.bubble').innerHTML = '<p style="color:#b91c1c">Error: '+(e && e.message ? e.message : String(e))+'</p>';
+      if (elErr) elErr.textContent = 'Send error: ' + (e && e.message ? e.message : String(e));
     }
   }
 
