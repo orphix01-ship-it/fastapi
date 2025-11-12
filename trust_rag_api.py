@@ -147,7 +147,8 @@ def _clean_openai_key(raw: str) -> str:
     s = (raw or "").strip()
     if not s.startswith("sk-"):
         parts = [t.strip() for t in s.replace("=", " ").split() if t.strip().startswith("sk-")]
-        if parts: s = parts[-1]
+        if parts:
+            s = parts[-1]
     if not s.startswith("sk-"):
         raise RuntimeError("OPENAI_API_KEY appears malformed.")
     return s
@@ -200,7 +201,8 @@ def _titles_only(uniq_sources: List[Dict[str, Any]]) -> List[str]:
     for s in uniq_sources:
         t = s["title"]
         if t not in seen:
-            seen.add(t); out.append(t)
+            seen.add(t)
+            out.append(t)
     return out
 
 # ========== SYNTHESIS ==========
@@ -217,10 +219,13 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
     buf, used, kept = [], 0, 0
     for s in snippets:
         s = s.strip()
-        if not s: continue
-        if used + len(s) > MAX_CONTEXT_CHARS: break
+        if not s:
+            continue
+        if used + len(s) > MAX_CONTEXT_CHARS:
+            break
         buf.append(s); used += len(s); kept += 1
-        if kept >= MAX_SNIPPETS: break
+        if kept >= MAX_SNIPPETS:
+            break
     context = "\n---\n".join(buf)
 
     titles = _titles_only(uniq_sources)
@@ -398,7 +403,7 @@ WIDGET_HTML = """<!doctype html>
   .left-tab .bar{width:2px; height:22px; background:#000; border-radius:2px}
   .brand{padding:14px 16px; text-align:left; border-bottom:1px solid var(--border)}
   .brand .title{font-family:var(--title); font-weight:300; font-size:18px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:block}
-  .brand-row{display:flex; align-items:center; justify-content:space-between; gap:8px}
+  .brand-row{display:flex; align-items:center; justify-content:space-between}
   .brand-btn{cursor:pointer; border:1px solid var(--border); background:#fff; color:#000; padding:6px 10px; border-radius:10px}
   .section{padding:12px; border-bottom:1px solid var(--border)}
   .label{font-size:12px; color:#6b7280; margin-bottom:6px}
@@ -448,7 +453,7 @@ WIDGET_HTML = """<!doctype html>
   #file{display:none}
 
   /* Right-side Conversation Tree panel */
-  .tree{border-left:1px solid var(--border); background:#fff; display:flex; flex-direction:column; overflow:hidden}
+  .tree{border-left:1px solid var(--border); background:#fff; display:flex; flex-direction:column; overflow:hidden; min-width:0}
   .tree.collapsed{width:0; min-width:0; border-left:none}
   .tree-head{display:flex; align-items:center; justify-content:space-between; padding:14px 16px; border-bottom:1px solid var(--border)}
   .tree-title{font-weight:600}
@@ -767,7 +772,6 @@ WIDGET_HTML = """<!doctype html>
   }
 
   // ====== Profile save / logout ======
-  // (explicit listeners to avoid delegation issues)
   document.getElementById('pf-save').addEventListener('click', ()=>{
     const uid = elPfId.value.trim();
     const em  = elPfEmail.value.trim();
@@ -1004,29 +1008,39 @@ WIDGET_HTML = """<!doctype html>
     }
   });
 
-  // === Sidebar/Tree toggles (explicit listeners so buttons always work) ===
-  function saveUI(){ localStorage.setItem('ui.layout.v1', JSON.stringify(ui)); }
-  const ui = (() => { try { return Object.assign({ sidebarOpen:true, treeOpen:true }, JSON.parse(localStorage.getItem('ui.layout.v1')||'{}')); } catch(_) { return { sidebarOpen:true, treeOpen:true }; }})();
-  function applyLayout(){
+  // === Robust UI toggle wiring (explicit listeners; no delegation) ===
+  (function(){
+    const UIKEY = 'ui.layout.v1';
+    const ui = (() => {
+      try { return Object.assign({ sidebarOpen:true, treeOpen:true }, JSON.parse(localStorage.getItem(UIKEY) || '{}')); }
+      catch(_) { return { sidebarOpen:true, treeOpen:true }; }
+    })();
+
     const rail = document.getElementById('rail');
     const tree = document.getElementById('treePane');
-    const body = document.body;
-    if (rail){
-      rail.classList.toggle('collapsed', !ui.sidebarOpen);
-      body.classList.toggle('sidebar-closed', !ui.sidebarOpen);
-    }
-    if (tree){
-      tree.classList.toggle('collapsed', !ui.treeOpen);
-      body.classList.toggle('tree-closed', !ui.treeOpen);
-    }
-  }
-  document.getElementById('btn-rail-collapse').addEventListener('click', ()=>{ ui.sidebarOpen = False if False else False; ui.sidebarOpen=False; saveUI(); applyLayout(); });
-  document.getElementById('left-tab').addEventListener('click', ()=>{ ui.sidebarOpen = true; saveUI(); applyLayout(); });
-  document.getElementById('btn-tree-toggle').addEventListener('click', ()=>{ ui.treeOpen = !ui.treeOpen; saveUI(); applyLayout(); });
+    const btnRailCollapse = document.getElementById('btn-rail-collapse');
+    const leftTab = document.getElementById('left-tab');
+    const btnTreeToggle = document.getElementById('btn-tree-toggle');
 
-  // Apply initial layout + render tree once
-  applyLayout();
-  renderTree();
+    function saveUI(){ localStorage.setItem(UIKEY, JSON.stringify(ui)); }
+    function applyLayout(){
+      if (rail){
+        rail.classList.toggle('collapsed', !ui.sidebarOpen);
+        document.body.classList.toggle('sidebar-closed', !ui.sidebarOpen);
+      }
+      if (tree){
+        tree.classList.toggle('collapsed', !ui.treeOpen);
+        document.body.classList.toggle('tree-closed', !ui.treeOpen);
+      }
+    }
+
+    btnRailCollapse && btnRailCollapse.addEventListener('click', ()=>{ ui.sidebarOpen = False || False; ui.sidebarOpen = False; saveUI(); applyLayout(); });
+    leftTab        && leftTab.addEventListener('click',          ()=>{ ui.sidebarOpen = true;  saveUI(); applyLayout(); });
+    btnTreeToggle  && btnTreeToggle.addEventListener('click',    ()=>{ ui.treeOpen    = !ui.treeOpen; saveUI(); applyLayout(); });
+
+    // Initial layout
+    applyLayout();
+  })();
 
   // Initial load (if user was remembered)
   if (state.userId) {
