@@ -372,7 +372,7 @@ def delete_chat(chat_id: str, user_id: str = Depends(get_current_user)):
     conn.close()
     return {"ok": True}
 
-# ========== WIDGET (Sidebar + Chat + Conversation Tree + Dev Prompt Modal) ==========
+# ========== WIDGET (Sidebar + Chat + Conversation Tree) ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -391,15 +391,9 @@ WIDGET_HTML = """<!doctype html>
   body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--font)}
   /* Three-pane layout: [Left Rail] | [Main] | [Right Tree] */
   .app{display:grid; grid-template-columns: 280px 1fr 320px; height:100vh; position:relative}
-  .rail{border-right:1px solid var(--border); background:var(--rail); display:flex; flex-direction:column; position:relative; transition:width .18s ease-in-out}
-  .rail.collapsed{width:0; min-width:0; overflow:hidden; border-right:none}
-  /* Always-visible reopen tab / logo on left edge */
-  .left-tab{position:fixed; left:0; top:12px; width:12px; height:48px; border:1px solid var(--border); border-left:none; border-radius:0 10px 10px 0; background:#fff; box-shadow:var(--shadow); display:flex; align-items:center; justify-content:center; cursor:pointer; z-index:30}
-  .left-tab .bar{width:2px; height:22px; background:#000; border-radius:2px}
+  .rail{border-right:1px solid var(--border); background:var(--rail); display:flex; flex-direction:column; position:relative}
   .brand{padding:14px 16px; text-align:center; border-bottom:1px solid var(--border)}
-  .brand .title{font-family:var(--title); font-weight:300; font-size:18px}
-  .brand-row{display:flex; align-items:center; justify-content:space-between}
-  .brand-btn{cursor:pointer; border:1px solid var(--border); background:#fff; color:#000; padding:6px 10px; border-radius:10px}
+  .brand .title{font-family:var(--title); font-weight:300; font-size:18px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
   .section{padding:12px; border-bottom:1px solid var(--border)}
   .label{font-size:12px; color:#6b7280; margin-bottom:6px}
   .row{display:flex; gap:6px}
@@ -414,8 +408,6 @@ WIDGET_HTML = """<!doctype html>
   .chatitem.active{outline:2px solid #000}
 
   .main{display:flex; flex-direction:column}
-  .header{background:#fff; padding:12px 16px; border-bottom:1px solid var(--border)}
-  .header .title{font-family:var(--title); font-weight:300; font-size:20px; text-align:center}
 
   .content{flex:1; overflow:auto; padding:24px 12px 140px}
   .container{max-width:900px; margin:0 auto}
@@ -436,10 +428,8 @@ WIDGET_HTML = """<!doctype html>
   .bubble pre{background:#fff;color:#000;border:1px solid var(--border);padding:12px;border-radius:12px;overflow:auto}
   .bubble blockquote{border-left:3px solid #000;padding:6px 12px;margin:8px 0;background:#fafafa}
 
-  /* Composer offsets adapt to sidebar/tree state */
-  .composer{position:fixed; left:280px; right:320px; bottom:0; background:#fff; padding:18px 12px; border-top:none; transition:left .18s ease-in-out, right .18s ease-in-out}
-  body.sidebar-closed .composer{left:0}
-  body.tree-closed .composer{right:0}
+  /* Composer */
+  .composer{position:fixed; left:280px; right:320px; bottom:0; background:#fff; padding:18px 12px; border-top:none}
   .bar{display:flex; align-items:flex-end; gap:8px; background:#fff; border:1px solid var(--ring); border-radius:22px; padding:8px; box-shadow:var(--shadow); max-width:900px; margin:0 auto}
   .cin{flex:1; min-height:24px; max-height:160px; overflow:auto; outline:none; padding:8px 10px; font:16px/1.5 var(--font); color:#000}
   .cin:empty:before{content:attr(data-placeholder); color:#000}
@@ -449,7 +439,6 @@ WIDGET_HTML = """<!doctype html>
 
   /* Right-side Conversation Tree panel */
   .tree{border-left:1px solid var(--border); background:#fff; display:flex; flex-direction:column; overflow:hidden}
-  .tree.collapsed{width:0; min-width:0; border-left:none}
   .tree-head{display:flex; align-items:center; justify-content:space-between; padding:12px 12px; border-bottom:1px solid var(--border)}
   .tree-title{font-weight:600}
   .tree-body{flex:1; overflow:auto; padding:10px}
@@ -464,13 +453,6 @@ WIDGET_HTML = """<!doctype html>
   .indent-2{margin-left:24px}
   .indent-3{margin-left:36px}
   .indent-4{margin-left:48px}
-
-  /* Dev Prompt Modal */
-  .modal-backdrop{position:fixed; inset:0; background:rgba(0,0,0,.25); display:none; align-items:center; justify-content:center; z-index:50}
-  .modal{background:#fff; width:min(960px, 96vw); max-height:90vh; border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow); display:flex; flex-direction:column}
-  .modal-head{display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--border)}
-  .modal-body{padding:12px; overflow:auto}
-  .modal textarea{width:100%; height:60vh; border:1px solid var(--border); border-radius:10px; padding:10px; font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono","Roboto Mono","Oxygen Mono","Ubuntu Mono","Courier New",monospace; color:#000; background:#fff}
 </style>
 </head>
 <body>
@@ -478,13 +460,7 @@ WIDGET_HTML = """<!doctype html>
     <!-- Left rail -->
     <aside class="rail" id="rail">
       <div class="brand">
-        <div class="brand-row">
-          <div class="title">Private Trust Fiduciary Advisor</div>
-          <div style="display:flex; gap:8px">
-            <button id="btn-dev-prompt" class="brand-btn" title="Open dev prompt modal" aria-label="Open dev prompt">Dev Prompt</button>
-            <button id="btn-rail-collapse" class="brand-btn" title="Collapse sidebar" aria-label="Collapse sidebar">⟨⟨</button>
-          </div>
-        </div>
+        <div class="title">Private Trust Fiduciary Advisor</div>
       </div>
 
       <div class="section">
@@ -503,7 +479,7 @@ WIDGET_HTML = """<!doctype html>
       </div>
 
       <div class="section">
-        <div class="row">
+        <div class="row" style="gap:8px">
           <button id="btn-newchat" class="btn primary">New Chat</button>
         </div>
       </div>
@@ -514,8 +490,6 @@ WIDGET_HTML = """<!doctype html>
 
     <!-- Main pane -->
     <main class="main">
-      <div class="header"><div class="title">Advisor</div></div>
-
       <div class="content">
         <div class="container">
           <div id="thread" class="thread"></div>
@@ -528,7 +502,7 @@ WIDGET_HTML = """<!doctype html>
       <div class="tree-head">
         <div class="tree-title">Conversation Tree</div>
         <div class="tree-actions">
-          <button id="btn-tree-toggle" class="btn" title="Collapse tree" aria-label="Collapse tree">⟩⟩</button>
+          <button id="btn-tree-toggle" class="btn" title="Collapse/Expand tree" aria-label="Collapse/Expand tree">Toggle</button>
           <button id="btn-new-root" class="btn primary" title="New root">New Root</button>
         </div>
       </div>
@@ -539,25 +513,6 @@ WIDGET_HTML = """<!doctype html>
         <div id="treeList"></div>
       </div>
     </aside>
-  </div>
-
-  <!-- Always-visible left reopen tab -->
-  <button id="left-tab" class="left-tab" title="Open sidebar" aria-label="Open sidebar"><span class="bar"></span></button>
-
-  <!-- Dev Prompt Modal -->
-  <div id="dev-modal" class="modal-backdrop" aria-hidden="true">
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dev-modal-title">
-      <div class="modal-head">
-        <div id="dev-modal-title" style="font-weight:600">System / Dev Prompt</div>
-        <div style="display:flex; gap:8px">
-          <button id="btn-copy-prompt" class="btn primary" title="Copy to clipboard">Copy</button>
-          <button id="btn-close-modal" class="btn" title="Close">Close</button>
-        </div>
-      </div>
-      <div class="modal-body">
-        <textarea id="dev-prompt-text" readonly></textarea>
-      </div>
-    </div>
   </div>
 
   <!-- Composer -->
@@ -578,170 +533,32 @@ WIDGET_HTML = """<!doctype html>
   </div>
 
 <script>
-  // === DEV PROMPT (embedded safely, copyable) ===
-  const DEV_PROMPT = `# SYSTEM / DEV PROMPT — CONVERSATION TREE + ASSET MAP + EDIT/DELETE
-
-You are a senior full-stack engineer. Read all code that follows this prompt as the **current codebase**. Your job is to **augment (not rewrite)** the app with a robust conversation-management system featuring:
-
-1) **Collapsible Right-Hand Conversation Tree** that can be collapsed and ALWAYS be brought back (visible toggle; state persists).
-2) **Asset Map View** (overview map) showing all Roots and their Branches/threads like a file-system (roots, nodes, relationships, badges).
-3) **Full CRUD on Prompts and Branches**:
-   - Edit any prompt/message node inline.
-   - Delete any branch (soft-delete with confirm + undo).
-   - Rename root / relabel any node.
-4) **Perfect Root/Branch Management**:
-   - Any node can spawn branches.
-   - Selecting a node switches main view to its lineage.
-   - Each node can link to an existing \\\`chatId\\\`; selecting it restores that chat.
-   - Reordering children (drag/drop) supported.
-
-## Tech & Style assumptions (follow unless the pasted code proves otherwise)
-- Frontend: vanilla JS/HTML/CSS (or React if present), minimalist white UI.
-- State: Local state + \\\`localStorage\\\` persistence; if a backend exists, add **non-breaking** REST routes.
-- Do not introduce new heavy libraries.
-
-## Deliverables — EXACT OUTPUT FORMAT
-Return your answer **only** as a sequenced, patch-style upgrade guide with code blocks:
-
-1. **Summary**
-   - 3–5 sentences: what you added and why.
-2. **File Changes**
-   - For each file: \\\`PATH\\\` and one of **ADD**, **REPLACE ENTIRE FILE**, or **PATCH**.
-   - Provide **full contents** for new/fully replaced files.
-   - For patches, show exact regions with \\\`// INSERT ABOVE\\\` / \\\`// REPLACE FROM HERE … TO HERE\\\`.
-3. **Data Model**
-   - TS/JS interfaces/types for **ConversationRoot**, **MessageNode**, **TreeIndex**.
-   - Include flags for \\\`deletedAt\\\`, \\\`archived\\\`, and \\\`chatId\\\` linkage.
-4. **State & Persistence**
-   - Exact localStorage keys and JSON shapes.
-   - Undo/redo buffer design (last 20 ops).
-   - Optional REST routes (only if backend exists) with request/response examples.
-5. **UI/UX Behavior**
-   - Tree collapse/expand with persistent state and a visible toggle to bring it back.
-   - Asset Map: grid/list that summarizes roots, child counts, latest activity, quick actions.
-   - Node inline edit, branch delete (soft-delete with confirm + Undo), branch rename, drag/drop reorder.
-   - Keyboard & a11y notes.
-6. **Test Plan**
-   - Manual checklist for tree toggle persistence, CRUD, undo/redo, reordering, linkage to chats.
-7. **Migration**
-   - If legacy linear chats exist, auto-wrap into a single root + chain; no data loss.
-
-> Do **not** add commentary outside these sections. Don’t invent libraries not present in code. Keep imports/styles consistent.
-
----
-
-## Feature Spec
-
-### A) Conversation Tree (Right Panel)
-- **Collapse/Restore**: A “⟩⟩” button collapses the panel; a **persistent right-edge tab** (8–12px) stays visible to restore it. Persist in \\\`localStorage.ui.treeOpen:boolean\\\`.
-- **Selection**: Clicking a node sets \\\`currentNodeId\\\` and, if \\\`meta.chatId\\\` exists, loads that chat in main view.
-- **Branching**: “Branch” on any node creates a child node with role='user' and empty content, titled “New branch”.
-- **Editing**:
-  - **Inline edit** of node title/content via click or ✎ button; commit on Enter or blur; Esc cancels.
-  - **Rename Root** via ✎ next to root title.
-- **Deleting**:
-  - **Soft-delete** a node/branch via 🗑; confirm dialog. Mark \\\`deletedAt\\\` timestamp; hide by default (toggle “Show deleted”).
-  - Undo (Ctrl/Cmd+Z) restores last deleted item within current session if no further writes.
-- **Reordering**:
-  - Drag/drop siblings; write new order to \\\`children[]\\\` of the parent.
-
-### B) Asset Map (Global Overview)
-- Accessible via a “Map” button in the tree header.
-- Displays **all Roots** as cards with:
-  - Title, createdAt, latest activity timestamp.
-  - Counts: total nodes, active branches, deleted (if shown).
-  - Quick actions: **Open Root**, **New Branch**, **Rename**, **Archive**.
-- Clicking a card opens the root and focuses the tree view.
-- Support filter chips: *All / Active / Archived*; search by title/tag.
-
-### C) Data Model
-\`\`\`ts
-type ID = string; // uuid v4
-
-interface MessageNode {
-  id: ID;
-  rootId: ID;
-  parentId: ID | null;            // null => top-level under root
-  role: 'user'|'assistant'|'system';
-  content: string;                 // editable
-  createdAt: string;               // ISO
-  updatedAt?: string;              // ISO
-  deletedAt?: string | null;       // soft-delete marker
-  children: ID[];                  // ordered child IDs
-  meta?: {
-    title?: string;                // editable label
-    tags?: string[];
-    chatId?: string;               // optional linkage to /chats row
-    archived?: boolean;
-  };
-}
-
-interface ConversationRoot {
-  id: ID;
-  title: string;                   // editable
-  createdAt: string;               // ISO
-  updatedAt?: string;              // ISO
-  archived?: boolean;
-  firstNodeId: ID | null;
-}
-
-interface TreeIndex {
-  roots: ID[];                     // order for Asset Map
-  nodesById: Record<ID, MessageNode>;
-  rootsById: Record<ID, ConversationRoot>;
-  currentRootId: ID | null;
-  currentNodeId: ID | null;
-  showDeleted?: boolean;           // UI toggle for visibility
-}
-\`\`\``;
-
-  // === UI persistent state (sidebar + tree) ===
+  // ====== Layout state (tree only; sidebar collapse removed) ======
   const UIKEY = 'ui.layout.v1';
   const ui = (() => {
-    const def = { sidebarOpen: true, treeOpen: true };
+    const def = { treeOpen: true };
     try { return Object.assign(def, JSON.parse(localStorage.getItem(UIKEY) || '{}')); }
     catch(_){ return def; }
   })();
   function saveUI(){ localStorage.setItem(UIKEY, JSON.stringify(ui)); }
   function applyLayout(){
-    const rail = document.getElementById('rail');
     const tree = document.getElementById('treePane');
-    const body = document.body;
-    if (rail){
-      rail.classList.toggle('collapsed', !ui.sidebarOpen);
-      body.classList.toggle('sidebar-closed', !ui.sidebarOpen);
-    }
+    const composer = document.querySelector('.composer');
     if (tree){
-      tree.classList.toggle('collapsed', !ui.treeOpen);
-      body.classList.toggle('tree-closed', !ui.treeOpen);
+      if (ui.treeOpen){
+        tree.style.display = 'flex';
+        composer.style.right = '320px';
+      } else {
+        tree.style.display = 'none';
+        composer.style.right = '0';
+      }
     }
   }
+  // Tree toggle button
   document.addEventListener('click', (e)=>{
-    if (e.target && e.target.id === 'btn-rail-collapse'){
-      ui.sidebarOpen = false; saveUI(); applyLayout();
-    }
-    if (e.target && e.target.id === 'left-tab'){
-      ui.sidebarOpen = true; saveUI(); applyLayout();
-    }
     if (e.target && e.target.id === 'btn-tree-toggle'){
       ui.treeOpen = !ui.treeOpen; saveUI(); applyLayout();
     }
-  });
-
-  // ====== Dev Prompt Modal Wiring ======
-  const modal = document.getElementById('dev-modal');
-  const taPrompt = document.getElementById('dev-prompt-text');
-  const btnOpenPrompt = document.getElementById('btn-dev-prompt');
-  const btnCloseModal = document.getElementById('btn-close-modal');
-  const btnCopyPrompt = document.getElementById('btn-copy-prompt');
-
-  taPrompt.value = DEV_PROMPT;
-  btnOpenPrompt.addEventListener('click', ()=>{ modal.style.display='flex'; modal.setAttribute('aria-hidden','false'); });
-  btnCloseModal.addEventListener('click', ()=>{ modal.style.display='none'; modal.setAttribute('aria-hidden','true'); });
-  modal.addEventListener('click', (e)=>{ if(e.target===modal){ modal.style.display='none'; modal.setAttribute('aria-hidden','true'); }});
-  btnCopyPrompt.addEventListener('click', async ()=>{
-    try{ await navigator.clipboard.writeText(DEV_PROMPT); btnCopyPrompt.textContent='Copied'; setTimeout(()=>btnCopyPrompt.textContent='Copy',1000); }
-    catch(_){ /* no-op */ }
   });
 
   // ====== State ======
@@ -832,6 +649,7 @@ interface TreeIndex {
   const elChatList= document.getElementById('chatlist');
   const elRoots   = document.getElementById('roots');
   const elTreeList= document.getElementById('treeList');
+  const btnNewRoot= document.getElementById('btn-new-root');
 
   // Prefill profile inputs
   elPfId.value    = state.userId || '';
@@ -901,38 +719,38 @@ interface TreeIndex {
   // ====== Formatting helpers ======
   function mdToHtml(md){
     if(!md) return '';
-    if (/<\\w+[^>]*>/.test(md)) return md;
+    if (/<\w+[^>]*>/.test(md)) return md;
     let h = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    h = h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+    h = h.replace(/```([\s\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
     h = h.replace(/`([^`]+?)`/g,'<code>$1</code>');
-    h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>').replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>').replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
-    h = h.replace(/^>\\s?(.*)$/gm, '<blockquote>$1</blockquote>');
-    h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>').replace(/__(.+?)__/g,'<strong>$1</strong>').replace(/\\*(?!\\s)(.+?)\\*/g,'<em>$1</em>').replace(/_(?!\\s)(.+?)_/g,'<em>$1</em>');
-    h = h.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
-    h = h.replace(/(^|\\s)(https?:\\/\\/[^\\s<]+)(?=\\s|$)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
-    h = h.replace(/(?:^|\\n)(\\d+)\\.\\s+(.+)(?:(?=\\n\\d+\\.\\s)|$)/gms,(m)=>{const items=m.trim().split(/\\n(?=\\d+\\.\\s)/).map(it=>it.replace(/^\\d+\\.\\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ol>${items}</ol>`;});
-    h = h.replace(/(?:^|\\n)[*-]\\s+(.+)(?:(?=\\n[*-]\\s)|$)/gms,(m)=>{const items=m.trim().split(/\\n(?=[*-]\\s)/).map(it=>it.replace(/^[*-]\\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ul>${items}</ul>`;});
-    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
+    h = h.replace(/^######\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\s+(.*)$/gm,'<h5>$1</h5>').replace(/^####\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\s+(.*)$/gm,'<h3>$1</h3>').replace(/^##\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\s+(.*)$/gm,'<h1>$1</h1>');
+    h = h.replace(/^>\s?(.*)$/gm, '<blockquote>$1</blockquote>');
+    h = h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/__(.+?)__/g,'<strong>$1</strong>').replace(/\*(?!\s)(.+?)\*/g,'<em>$1</em>').replace(/_(?!\s)(.+?)_/g,'<em>$1</em>');
+    h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+    h = h.replace(/(^|\s)(https?:\/\/[^\s<]+)(?=\s|$)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    h = h.replace(/(?:^|\n)(\d+)\.\s+(.+)(?:(?=\n\d+\.\s)|$)/gms,(m)=>{const items=m.trim().split(/\n(?=\d+\.\s)/).map(it=>it.replace(/^\d+\.\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ol>${items}</ol>`;});
+    h = h.replace(/(?:^|\n)[*-]\s+(.+)(?:(?=\n[*-]\s)|$)/gms,(m)=>{const items=m.trim().split(/\n(?=[*-]\s)/).map(it=>it.replace(/^[*-]\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ul>${items}</ul>`;});
+    h = h.replace(/\n{2,}/g,'</p><p>').replace(/^(?!<h\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
     return h;
   }
   function applyInlineFormatting(html){
     if(!html) return ''; let out=String(html); const slots=[];
-    function protect(tag){ const re=new RegExp(`<${tag}\\\\b[^>]*>[\\\\s\\\\S]*?<\\\\/${tag}>`,'gi'); out=out.replace(re,m=>{const key=\`__SLOT_\${tag.toUpperCase()}_\${slots.length}__\`; slots.push({key,val:m}); return key;});}
+    function protect(tag){ const re=new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`,'gi'); out=out.replace(re,m=>{const key=`__SLOT_${tag.toUpperCase()}_${slots.length}__`; slots.push({key,val:m}); return key;});}
     protect('code'); protect('pre'); protect('a');
-    out = out.replace(/\\*\\*([^*]+?)\\*\\*/g,'<strong>$1</strong>')
+    out = out.replace(/\*\*([^*]+?)\*\*/g,'<strong>$1</strong>')
              .replace(/__([^_]+?)__/g,'<strong>$1</strong>')
-             .replace(/(^|[^*])\\*([^*\\n]+?)\\*/g,'$1<em>$2</em>')
-             .replace(/(^|[^_])_([^_\\n]+?)_/g,'$1<em>$2</em>');
+             .replace(/(^|[^*])\*([^*\n]+?)\*/g,'$1<em>$2</em>')
+             .replace(/(^|[^_])_([^_\n]+?)_/g,'$1<em>$2</em>');
     for(const {key,val} of slots) out=out.replace(key, val);
     return out;
   }
   function normalizeTrustDoc(html){
     let out=html;
-    out=out.replace(/<p>\\s*<strong>\\s*([A-Z0-9][A-Z0-9\\s\\-&,.'()]+?)\\s*<\\/strong>\\s*<\\/p>/g,'<h2>$1</h2><p></p>');
-    const map=[{re:/<strong>\\s*TRUST\\s*NAME\\s*:\\s*<\\/strong>/gi,rep:'Trust: '},{re:/<strong>\\s*DATE\\s*:\\s*<\\/strong>/gi,rep:'Date: '},{re:/<strong>\\s*TAX\\s*YEAR\\s*:\\s*<\\/strong>/gi,rep:'Tax Year: '},{re:/<strong>\\s*TRUSTEE\\(S\\)\\s*:\\s*<\\/strong>/gi,rep:'Trustee(s): '},{re:/<strong>\\s*LOCATION\\s*:\\s*<\\/strong>/gi,rep:'Location: '}];
+    out=out.replace(/<p>\s*<strong>\s*([A-Z0-9][A-Z0-9\s\-&,.'()]+?)\s*<\/strong>\s*<\/p>/g,'<h2>$1</h2><p></p>');
+    const map=[{re:/<strong>\s*TRUST\s*NAME\s*:\s*<\/strong>/gi,rep:'Trust: '},{re:/<strong>\s*DATE\s*:\s*<\/strong>/gi,rep:'Date: '},{re:/<strong>\s*TAX\s*YEAR\s*:\s*<\/strong>/gi,rep:'Tax Year: '},{re:/<strong>\s*TRUSTEE\(S\)\s*:\s*<\/strong>/gi,rep:'Trustee(s): '},{re:/<strong>\s*LOCATION\s*:\s*<\/strong>/gi,rep:'Location: '}];
     map.forEach(({re,rep})=>{ out=out.replace(re,rep) });
-    out=out.replace(/<strong>\\s*([A-Za-z][A-Za-z()\\s]+:)\\s*<\\/strong>\\s*/g,'$1 ');
-    out=out.replace(/\\*\\*\\s*TRUST\\s*NAME\\s*:\\s*\\*\\*/gi,'Trust: ').replace(/\\*\\*\\s*DATE\\s*:\\s*\\*\\*/gi,'Date: ').replace(/\\*\\*\\s*TAX\\s*YEAR\\s*:\\s*\\*\\*/gi,'Tax Year: ').replace(/\\*\\*\\s*TRUSTEE\\(S\\)\\s*:\\s*\\*\\*/gi,'Trustee(s): ').replace(/\\*\\*\\s*LOCATION\\s*:\\s*\\*\\*/gi,'Location: ');
+    out=out.replace(/<strong>\s*([A-Za-z][A-Za-z()\s]+:)\s*<\/strong>\s*/g,'$1 ');
+    out=out.replace(/\*\*\s*TRUST\s*NAME\s*:\s*\*\*/gi,'Trust: ').replace(/\*\*\s*DATE\s*:\s*\*\*/gi,'Date: ').replace(/\*\*\s*TAX\s*YEAR\s*:\s*\*\*/gi,'Tax Year: ').replace(/\*\*\s*TRUSTEE\(S\)\s*:\s*\*\*/gi,'Trustee(s): ').replace(/\*\*\s*LOCATION\s*:\s*\*\*/gi,'Location: ');
     return out;
   }
 
@@ -1088,11 +906,19 @@ interface TreeIndex {
     }
   });
 
+  // === New Root button (fix: wire up) ===
+  if (btnNewRoot){
+    btnNewRoot.addEventListener('click', ()=>{
+      const title = prompt('Root title (e.g., "Client: Chris Glick")') || 'Untitled Root';
+      newRoot(title);
+    });
+  }
+
   // ====== RAG calls ======
   function readInput(){
     const tmp = elInput.cloneNode(true);
     tmp.querySelectorAll('div').forEach(d=>{ if (d.innerHTML === "<br>") d.innerHTML = "\\n"; });
-    return tmp.innerText.replace(/\\u00A0/g,' ').trim();
+    return tmp.innerText.replace(/\u00A0/g,' ').trim();
   }
 
   async function callRag(q, chatId){
@@ -1118,7 +944,7 @@ interface TreeIndex {
   async function handleSend(q){
     if(!state.userId){ elPfMsg.textContent='Please enter Client ID and Save first.'; return; }
     if(!q) return;
-    addMessage('user', q.replace(/\\n/g,'<br>'));
+    addMessage('user', q.replace(/\n/g,'<br>'));
     // === Conversation Tree integration (ensure root/node, then append user node) ===
     if (!tree.currentRootId){
       // auto-create a default root on first send if none exists
@@ -1157,7 +983,7 @@ interface TreeIndex {
       if (pendingNodeId && currentChatId){ setNodeChat(pendingNodeId, currentChatId); }
 
       let html = (data && data.answer) ? data.answer : '';
-      const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
+      const looksHtml = typeof html==='string' && /<\w+[^>]*>/.test(html);
       let rendered = looksHtml ? html : mdToHtml(String(html||''));
       rendered = applyInlineFormatting(rendered);
       rendered = normalizeTrustDoc(rendered);
@@ -1195,7 +1021,7 @@ interface TreeIndex {
     }
   });
 
-  // Apply initial layout + render tree once
+  // Initial layout + tree render
   applyLayout();
   renderTree();
 
@@ -1259,17 +1085,17 @@ def search_endpoint(
         titles = _titles_only(uniq)
         rows = []
         for s in uniq:
-          meta = s.get("meta") if isinstance(s, dict) else {}
-          if not meta and isinstance(s, dict):
-              meta = s.get("meta", {})
-          rows.append({
-              "title":   s["title"],
-              "level":   s["level"],
-              "page":    s["page"],
-              "version": s.get("version",""),
-              "score":   s["score"],
-              "snippet": _extract_snippet(meta or {}) or ""
-          })
+            meta = s.get("meta") if isinstance(s, dict) else {}
+            if not meta and isinstance(s, dict):
+                meta = s.get("meta", {})
+            rows.append({
+                "title":   s["title"],
+                "level":   s["level"],
+                "page":    s["page"],
+                "version": s.get("version",""),
+                "score":   s["score"],
+                "snippet": _extract_snippet(meta or {}) or ""
+            })
         return {"question": question, "titles": titles, "matches": rows, "t_ms": int((time.time()-t0)*1000)}
     except Exception as e:
         traceback.print_exc()
