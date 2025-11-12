@@ -372,7 +372,7 @@ def delete_chat(chat_id: str, user_id: str = Depends(get_current_user)):
     conn.close()
     return {"ok": True}
 
-# ========== WIDGET (Sidebar + Chat + Conversation Tree) ==========
+# ========== WIDGET (Sidebar + Chat + Conversation Tree + Dev Prompt Modal) ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -464,6 +464,13 @@ WIDGET_HTML = """<!doctype html>
   .indent-2{margin-left:24px}
   .indent-3{margin-left:36px}
   .indent-4{margin-left:48px}
+
+  /* Dev Prompt Modal */
+  .modal-backdrop{position:fixed; inset:0; background:rgba(0,0,0,.25); display:none; align-items:center; justify-content:center; z-index:50}
+  .modal{background:#fff; width:min(960px, 96vw); max-height:90vh; border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow); display:flex; flex-direction:column}
+  .modal-head{display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--border)}
+  .modal-body{padding:12px; overflow:auto}
+  .modal textarea{width:100%; height:60vh; border:1px solid var(--border); border-radius:10px; padding:10px; font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono","Roboto Mono","Oxygen Mono","Ubuntu Mono","Courier New",monospace; color:#000; background:#fff}
 </style>
 </head>
 <body>
@@ -473,7 +480,10 @@ WIDGET_HTML = """<!doctype html>
       <div class="brand">
         <div class="brand-row">
           <div class="title">Private Trust Fiduciary Advisor</div>
-          <button id="btn-rail-collapse" class="brand-btn" title="Collapse sidebar" aria-label="Collapse sidebar">⟨⟨</button>
+          <div style="display:flex; gap:8px">
+            <button id="btn-dev-prompt" class="brand-btn" title="Open dev prompt modal" aria-label="Open dev prompt">Dev Prompt</button>
+            <button id="btn-rail-collapse" class="brand-btn" title="Collapse sidebar" aria-label="Collapse sidebar">⟨⟨</button>
+          </div>
         </div>
       </div>
 
@@ -534,6 +544,22 @@ WIDGET_HTML = """<!doctype html>
   <!-- Always-visible left reopen tab -->
   <button id="left-tab" class="left-tab" title="Open sidebar" aria-label="Open sidebar"><span class="bar"></span></button>
 
+  <!-- Dev Prompt Modal -->
+  <div id="dev-modal" class="modal-backdrop" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dev-modal-title">
+      <div class="modal-head">
+        <div id="dev-modal-title" style="font-weight:600">System / Dev Prompt</div>
+        <div style="display:flex; gap:8px">
+          <button id="btn-copy-prompt" class="btn primary" title="Copy to clipboard">Copy</button>
+          <button id="btn-close-modal" class="btn" title="Close">Close</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <textarea id="dev-prompt-text" readonly></textarea>
+      </div>
+    </div>
+  </div>
+
   <!-- Composer -->
   <div class="composer">
     <div class="bar">
@@ -552,6 +578,123 @@ WIDGET_HTML = """<!doctype html>
   </div>
 
 <script>
+  // === DEV PROMPT (embedded safely, copyable) ===
+  const DEV_PROMPT = `# SYSTEM / DEV PROMPT — CONVERSATION TREE + ASSET MAP + EDIT/DELETE
+
+You are a senior full-stack engineer. Read all code that follows this prompt as the **current codebase**. Your job is to **augment (not rewrite)** the app with a robust conversation-management system featuring:
+
+1) **Collapsible Right-Hand Conversation Tree** that can be collapsed and ALWAYS be brought back (visible toggle; state persists).
+2) **Asset Map View** (overview map) showing all Roots and their Branches/threads like a file-system (roots, nodes, relationships, badges).
+3) **Full CRUD on Prompts and Branches**:
+   - Edit any prompt/message node inline.
+   - Delete any branch (soft-delete with confirm + undo).
+   - Rename root / relabel any node.
+4) **Perfect Root/Branch Management**:
+   - Any node can spawn branches.
+   - Selecting a node switches main view to its lineage.
+   - Each node can link to an existing \\\`chatId\\\`; selecting it restores that chat.
+   - Reordering children (drag/drop) supported.
+
+## Tech & Style assumptions (follow unless the pasted code proves otherwise)
+- Frontend: vanilla JS/HTML/CSS (or React if present), minimalist white UI.
+- State: Local state + \\\`localStorage\\\` persistence; if a backend exists, add **non-breaking** REST routes.
+- Do not introduce new heavy libraries.
+
+## Deliverables — EXACT OUTPUT FORMAT
+Return your answer **only** as a sequenced, patch-style upgrade guide with code blocks:
+
+1. **Summary**
+   - 3–5 sentences: what you added and why.
+2. **File Changes**
+   - For each file: \\\`PATH\\\` and one of **ADD**, **REPLACE ENTIRE FILE**, or **PATCH**.
+   - Provide **full contents** for new/fully replaced files.
+   - For patches, show exact regions with \\\`// INSERT ABOVE\\\` / \\\`// REPLACE FROM HERE … TO HERE\\\`.
+3. **Data Model**
+   - TS/JS interfaces/types for **ConversationRoot**, **MessageNode**, **TreeIndex**.
+   - Include flags for \\\`deletedAt\\\`, \\\`archived\\\`, and \\\`chatId\\\` linkage.
+4. **State & Persistence**
+   - Exact localStorage keys and JSON shapes.
+   - Undo/redo buffer design (last 20 ops).
+   - Optional REST routes (only if backend exists) with request/response examples.
+5. **UI/UX Behavior**
+   - Tree collapse/expand with persistent state and a visible toggle to bring it back.
+   - Asset Map: grid/list that summarizes roots, child counts, latest activity, quick actions.
+   - Node inline edit, branch delete (soft-delete with confirm + Undo), branch rename, drag/drop reorder.
+   - Keyboard & a11y notes.
+6. **Test Plan**
+   - Manual checklist for tree toggle persistence, CRUD, undo/redo, reordering, linkage to chats.
+7. **Migration**
+   - If legacy linear chats exist, auto-wrap into a single root + chain; no data loss.
+
+> Do **not** add commentary outside these sections. Don’t invent libraries not present in code. Keep imports/styles consistent.
+
+---
+
+## Feature Spec
+
+### A) Conversation Tree (Right Panel)
+- **Collapse/Restore**: A “⟩⟩” button collapses the panel; a **persistent right-edge tab** (8–12px) stays visible to restore it. Persist in \\\`localStorage.ui.treeOpen:boolean\\\`.
+- **Selection**: Clicking a node sets \\\`currentNodeId\\\` and, if \\\`meta.chatId\\\` exists, loads that chat in main view.
+- **Branching**: “Branch” on any node creates a child node with role='user' and empty content, titled “New branch”.
+- **Editing**:
+  - **Inline edit** of node title/content via click or ✎ button; commit on Enter or blur; Esc cancels.
+  - **Rename Root** via ✎ next to root title.
+- **Deleting**:
+  - **Soft-delete** a node/branch via 🗑; confirm dialog. Mark \\\`deletedAt\\\` timestamp; hide by default (toggle “Show deleted”).
+  - Undo (Ctrl/Cmd+Z) restores last deleted item within current session if no further writes.
+- **Reordering**:
+  - Drag/drop siblings; write new order to \\\`children[]\\\` of the parent.
+
+### B) Asset Map (Global Overview)
+- Accessible via a “Map” button in the tree header.
+- Displays **all Roots** as cards with:
+  - Title, createdAt, latest activity timestamp.
+  - Counts: total nodes, active branches, deleted (if shown).
+  - Quick actions: **Open Root**, **New Branch**, **Rename**, **Archive**.
+- Clicking a card opens the root and focuses the tree view.
+- Support filter chips: *All / Active / Archived*; search by title/tag.
+
+### C) Data Model
+\`\`\`ts
+type ID = string; // uuid v4
+
+interface MessageNode {
+  id: ID;
+  rootId: ID;
+  parentId: ID | null;            // null => top-level under root
+  role: 'user'|'assistant'|'system';
+  content: string;                 // editable
+  createdAt: string;               // ISO
+  updatedAt?: string;              // ISO
+  deletedAt?: string | null;       // soft-delete marker
+  children: ID[];                  // ordered child IDs
+  meta?: {
+    title?: string;                // editable label
+    tags?: string[];
+    chatId?: string;               // optional linkage to /chats row
+    archived?: boolean;
+  };
+}
+
+interface ConversationRoot {
+  id: ID;
+  title: string;                   // editable
+  createdAt: string;               // ISO
+  updatedAt?: string;              // ISO
+  archived?: boolean;
+  firstNodeId: ID | null;
+}
+
+interface TreeIndex {
+  roots: ID[];                     // order for Asset Map
+  nodesById: Record<ID, MessageNode>;
+  rootsById: Record<ID, ConversationRoot>;
+  currentRootId: ID | null;
+  currentNodeId: ID | null;
+  showDeleted?: boolean;           // UI toggle for visibility
+}
+\`\`\``;
+
   // === UI persistent state (sidebar + tree) ===
   const UIKEY = 'ui.layout.v1';
   const ui = (() => {
@@ -583,6 +726,22 @@ WIDGET_HTML = """<!doctype html>
     if (e.target && e.target.id === 'btn-tree-toggle'){
       ui.treeOpen = !ui.treeOpen; saveUI(); applyLayout();
     }
+  });
+
+  // ====== Dev Prompt Modal Wiring ======
+  const modal = document.getElementById('dev-modal');
+  const taPrompt = document.getElementById('dev-prompt-text');
+  const btnOpenPrompt = document.getElementById('btn-dev-prompt');
+  const btnCloseModal = document.getElementById('btn-close-modal');
+  const btnCopyPrompt = document.getElementById('btn-copy-prompt');
+
+  taPrompt.value = DEV_PROMPT;
+  btnOpenPrompt.addEventListener('click', ()=>{ modal.style.display='flex'; modal.setAttribute('aria-hidden','false'); });
+  btnCloseModal.addEventListener('click', ()=>{ modal.style.display='none'; modal.setAttribute('aria-hidden','true'); });
+  modal.addEventListener('click', (e)=>{ if(e.target===modal){ modal.style.display='none'; modal.setAttribute('aria-hidden','true'); }});
+  btnCopyPrompt.addEventListener('click', async ()=>{
+    try{ await navigator.clipboard.writeText(DEV_PROMPT); btnCopyPrompt.textContent='Copied'; setTimeout(()=>btnCopyPrompt.textContent='Copy',1000); }
+    catch(_){ /* no-op */ }
   });
 
   // ====== State ======
@@ -758,7 +917,7 @@ WIDGET_HTML = """<!doctype html>
   }
   function applyInlineFormatting(html){
     if(!html) return ''; let out=String(html); const slots=[];
-    function protect(tag){ const re=new RegExp(`<${tag}\\\\b[^>]*>[\\\\s\\\\S]*?<\\\\/${tag}>`,'gi'); out=out.replace(re,m=>{const key=`__SLOT_${tag.toUpperCase()}_${slots.length}__`; slots.push({key,val:m}); return key;});}
+    function protect(tag){ const re=new RegExp(`<${tag}\\\\b[^>]*>[\\\\s\\\\S]*?<\\\\/${tag}>`,'gi'); out=out.replace(re,m=>{const key=\`__SLOT_\${tag.toUpperCase()}_\${slots.length}__\`; slots.push({key,val:m}); return key;});}
     protect('code'); protect('pre'); protect('a');
     out = out.replace(/\\*\\*([^*]+?)\\*\\*/g,'<strong>$1</strong>')
              .replace(/__([^_]+?)__/g,'<strong>$1</strong>')
@@ -1100,17 +1259,17 @@ def search_endpoint(
         titles = _titles_only(uniq)
         rows = []
         for s in uniq:
-            meta = s.get("meta") if isinstance(s, dict) else {}
-            if not meta and isinstance(s, dict):
-                meta = s.get("meta", {})
-            rows.append({
-                "title":   s["title"],
-                "level":   s["level"],
-                "page":    s["page"],
-                "version": s.get("version",""),
-                "score":   s["score"],
-                "snippet": _extract_snippet(meta or {}) or ""
-            })
+          meta = s.get("meta") if isinstance(s, dict) else {}
+          if not meta and isinstance(s, dict):
+              meta = s.get("meta", {})
+          rows.append({
+              "title":   s["title"],
+              "level":   s["level"],
+              "page":    s["page"],
+              "version": s.get("version",""),
+              "score":   s["score"],
+              "snippet": _extract_snippet(meta or {}) or ""
+          })
         return {"question": question, "titles": titles, "matches": rows, "t_ms": int((time.time()-t0)*1000)}
     except Exception as e:
         traceback.print_exc()
