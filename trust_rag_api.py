@@ -205,12 +205,6 @@ def _titles_only(uniq_sources: List[Dict[str, Any]]) -> List[str]:
 
 # ========== SYNTHESIS ==========
 def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets: List[str]) -> str:
-    """
-    Synthesizes a clean HTML answer using a system message that enforces:
-    - HTML-only output (no markdown asterisks)
-    - Proper tags for bold/italic/headings/lists/links
-    - Professional legal formatting
-    """
     if not snippets and not uniq_sources:
         return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
 
@@ -234,13 +228,7 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
 
     system_msg = (
         "You are the Private Trust Fiduciary Advisor. "
-        "Always respond using clean, valid HTML (no markdown asterisks). "
-        "Use <strong> for bold, <em> for italics, <h1>-<h6> for headings, "
-        "<ul>/<ol> for lists, <pre><code> for code, and <a> for links. "
-        "Prefer professional, legal-style formatting suitable for trust "
-        "and fiduciary documents. If the content resembles a formal instrument "
-        "(resolutions, certificates), format labels as plain lines like "
-        "“Date: …”, “Trust: …”, “Tax Year: …”, “Location: …”."
+        "Always respond using clean, valid HTML."
     )
 
     try:
@@ -255,7 +243,7 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
         )
         html = (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content.strip()
         if not html:
-            return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
+            return "<p>No relevant material found.</p>"
         if "<" not in html:
             html = "<div><p>" + html.replace("\n", "<br>") + "</p></div>"
         return html
@@ -372,7 +360,7 @@ def delete_chat(chat_id: str, user_id: str = Depends(get_current_user)):
     conn.close()
     return {"ok": True}
 
-# ========== WIDGET (Sidebar + Chat + Conversation Tree) ==========
+# ========== WIDGET ==========
 WIDGET_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -390,22 +378,24 @@ WIDGET_HTML = """<!doctype html>
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--font)}
 
-  /* Three-pane layout that actually collapses columns */
-  .app{display:grid; grid-template-columns: 280px 1fr 320px; height:100vh; position:relative}
-  body.sidebar-closed .app{grid-template-columns: 0 1fr 320px}
+  /* Grid that truly collapses columns without overflow */
+  .app{display:grid; grid-template-columns: 280px 1fr 360px; height:100vh}
+  body.sidebar-closed .app{grid-template-columns: 0 1fr 360px}
   body.tree-closed .app{grid-template-columns: 280px 1fr 0}
   body.sidebar-closed.tree-closed .app{grid-template-columns: 0 1fr 0}
 
-  .rail{border-right:1px solid var(--border); background:var(--rail); display:flex; flex-direction:column; position:relative}
-  .rail.collapsed{overflow:hidden; border-right:none}
-
-  .brand{padding:14px 16px; border-bottom:1px solid var(--border)}
-  .brand .title{font-family:var(--title); font-weight:300; font-size:18px; white-space:nowrap}
+  .rail{border-right:1px solid var(--border); background:var(--rail); display:flex; flex-direction:column; min-width:0}
+  .brand{padding:12px 12px 8px; border-bottom:1px solid var(--border)}
+  .brand .title{
+    font-family:var(--title); font-weight:300; font-size:20px;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:block
+  }
+  .title-actions{display:flex; gap:8px; margin-top:8px; flex-wrap:wrap}
 
   .section{padding:12px; border-bottom:1px solid var(--border)}
   .label{font-size:12px; color:#6b7280; margin-bottom:6px}
   .row{display:flex; gap:6px}
-  .input{flex:1; border:1px solid var(--border); border-radius:10px; padding:6px 8px; background:#fff; color:#000}
+  .input{flex:1; border:1px solid var(--border); border-radius:10px; padding:6px 8px; background:#fff}
   .btn{cursor:pointer; border:1px solid var(--border); background:#fff; color:#000; padding:6px 10px; border-radius:10px}
   .btn.primary{background:#000; color:#fff; border-color:#000}
   .chats{flex:1; overflow:auto; padding:8px}
@@ -415,67 +405,45 @@ WIDGET_HTML = """<!doctype html>
   .chatitem .actions{display:flex; gap:6px}
   .chatitem.active{outline:2px solid #000}
 
-  .main{display:flex; flex-direction:column}
-
-  /* Header/title removed per request */
-
+  .main{display:flex; flex-direction:column; min-width:0}
   .content{flex:1; overflow:auto; padding:24px 12px 140px}
   .container{max-width:900px; margin:0 auto}
   .thread{display:flex; flex-direction:column; gap:16px}
-  .msg{padding:0}
   .msg .bubble{display:inline-block; max-width:80%}
   .msg.user .bubble{background:var(--user); border:1px solid var(--border); border-radius:14px; padding:12px 14px; box-shadow:var(--shadow)}
   .msg.advisor .bubble{background:transparent; padding:0; max-width:100%}
   .meta{font-size:12px; margin-bottom:6px; color:#000}
-
-  .bubble h1,.bubble h2,.bubble h3{margin:.6em 0 .4em}
   .bubble p{margin:.6em 0}
-  .bubble ul, .bubble ol{margin:.4em 0 .6em 1.4em}
-  .bubble a{color:#000; text-decoration:underline}
-  .bubble strong{font-weight:700}
-  .bubble em{font-style:italic}
-  .bubble code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,"Cascadia Mono","Segoe UI Mono","Roboto Mono","Oxygen Mono","Ubuntu Mono","Courier New",monospace;background:#fff;border:1px solid var(--border);padding:.1em .3em;border-radius:6px;color:#000}
-  .bubble pre{background:#fff;color:#000;border:1px solid var(--border);padding:12px;border-radius:12px;overflow:auto}
-  .bubble blockquote{border-left:3px solid #000;padding:6px 12px;margin:8px 0;background:#fafafa}
 
-  /* Composer offsets adapt to sidebar/tree state */
-  .composer{position:fixed; left:280px; right:320px; bottom:0; background:#fff; padding:18px 12px; border-top:none; transition:left .18s ease-in-out, right .18s ease-in-out}
+  /* Composer follows column widths */
+  .composer{position:fixed; left:280px; right:360px; bottom:0; background:#fff; padding:18px 12px; transition:left .18s,right .18s; border-top:1px solid var(--border)}
   body.sidebar-closed .composer{left:0}
   body.tree-closed .composer{right:0}
   .bar{display:flex; align-items:flex-end; gap:8px; background:#fff; border:1px solid var(--ring); border-radius:22px; padding:8px; box-shadow:var(--shadow); max-width:900px; margin:0 auto}
-  .cin{flex:1; min-height:24px; max-height:160px; overflow:auto; outline:none; padding:8px 10px; font:16px/1.5 var(--font); color:#000}
-  .cin:empty:before{content:attr(data-placeholder); color:#000}
-  .iconbtn{cursor:pointer; border:1px solid var(--border); background:#fff; color:#000; padding:8px 10px; border-radius:12px}
-  .send{border:1px solid #000; background:#000; color:#fff; border-radius:12px; padding:8px 12px}
-  #file{display:none}
+  .cin{flex:1; min-height:24px; max-height:160px; overflow:auto; outline:none; padding:8px 10px}
 
-  /* Right-side Conversation Tree panel */
-  .tree{border-left:1px solid var(--border); background:#fff; display:flex; flex-direction:column; overflow:hidden}
-  .tree-head{display:flex; align-items:center; justify-content:space-between; padding:12px 12px; border-bottom:1px solid var(--border)}
-  .tree-title{font-weight:600}
-  .tree-body{flex:1; overflow:auto; padding:10px}
-  .tree-actions{display:flex; gap:6px}
+  /* Right panel: add air so it isn't cramped */
+  .tree{border-left:1px solid var(--border); background:#fff; display:flex; flex-direction:column; min-width:0}
+  .tree-head{display:flex; align-items:center; justify-content:space-between; padding:14px 16px; border-bottom:1px solid var(--border)}
+  .tree-title{font-weight:700}
+  .tree-actions{display:flex; gap:8px}
+  .tree-body{flex:1; overflow:auto; padding:14px 16px 18px}
   .tree-item{padding:6px 8px; border-radius:8px; cursor:pointer}
   .tree-item:hover{background:#fafafa}
   .tree-item.active{outline:2px solid #000}
   .node-row{display:flex; align-items:center; gap:6px}
   .node-actions{display:flex; gap:6px; margin-left:auto}
-  .indent-0{margin-left:0}
-  .indent-1{margin-left:12px}
-  .indent-2{margin-left:24px}
-  .indent-3{margin-left:36px}
-  .indent-4{margin-left:48px}
 
-  /* Top-right always-visible control buttons */
+  /* Top-right global toggles */
   .top-controls{position:fixed; top:10px; right:10px; display:flex; gap:8px; z-index:40}
 </style>
 </head>
 <body>
 
-  <!-- Top-right always-visible controls -->
+  <!-- Always-visible controls -->
   <div class="top-controls">
-    <button id="btn-left-toggle" class="btn" title="Toggle left sidebar" aria-label="Toggle left sidebar">☰</button>
-    <button id="btn-right-toggle" class="btn" title="Toggle conversation tree" aria-label="Toggle right panel">⟷</button>
+    <button id="btn-left-toggle" class="btn" title="Toggle left sidebar">☰</button>
+    <button id="btn-right-toggle" class="btn" title="Toggle conversation tree">⟷</button>
   </div>
 
   <div class="app">
@@ -483,9 +451,9 @@ WIDGET_HTML = """<!doctype html>
     <aside class="rail" id="rail">
       <div class="brand">
         <div class="title">Private Trust Fiduciary Advisor</div>
-        <div style="margin-top:8px; display:flex; gap:8px">
-          <button id="btn-rail-collapse" class="btn" title="Collapse sidebar" aria-label="Collapse sidebar">Collapse</button>
-          <button id="btn-rail-open" class="btn" title="Open sidebar" aria-label="Open sidebar">Open</button>
+        <div class="title-actions">
+          <button id="btn-rail-collapse" class="btn">Collapse</button>
+          <button id="btn-rail-open" class="btn">Open</button>
         </div>
       </div>
 
@@ -514,9 +482,8 @@ WIDGET_HTML = """<!doctype html>
       <div id="chatlist" class="chats"></div>
     </aside>
 
-    <!-- Main pane -->
+    <!-- Main -->
     <main class="main">
-      <!-- header removed -->
       <div class="content">
         <div class="container">
           <div id="thread" class="thread"></div>
@@ -524,12 +491,12 @@ WIDGET_HTML = """<!doctype html>
       </div>
     </main>
 
-    <!-- Right-hand Conversation Tree -->
-    <aside class="tree" id="treePane" aria-label="Conversation Tree" role="complementary">
+    <!-- Right panel -->
+    <aside class="tree" id="treePane" aria-label="Conversation Tree">
       <div class="tree-head">
         <div class="tree-title">Conversation Tree</div>
         <div class="tree-actions">
-          <button id="btn-tree-toggle" class="btn" title="Toggle tree" aria-label="Toggle tree">Toggle</button>
+          <button id="btn-tree-toggle" class="btn">Toggle</button>
         </div>
       </div>
       <div class="tree-body">
@@ -559,6 +526,32 @@ WIDGET_HTML = """<!doctype html>
   </div>
 
 <script>
+  // Grab ALL DOM references FIRST so handlers don't reference undefined vars
+  const elRail           = document.getElementById('rail');
+  const elTreePane       = document.getElementById('treePane');
+  const elLeftToggle     = document.getElementById('btn-left-toggle');
+  const elRightToggle    = document.getElementById('btn-right-toggle');
+  const elRailCollapse   = document.getElementById('btn-rail-collapse');
+  const elRailOpen       = document.getElementById('btn-rail-open');
+  const elTreeToggle     = document.getElementById('btn-tree-toggle');
+
+  const elThread         = document.getElementById('thread');
+  const elInput          = document.getElementById('input');
+  const elSend           = document.getElementById('send');
+  const elAttach         = document.getElementById('attach');
+  const elFile           = document.getElementById('file');
+  const elHint           = document.getElementById('filehint');
+
+  const elPfId           = document.getElementById('pf-id');
+  const elPfEmail        = document.getElementById('pf-email');
+  const elPfSave         = document.getElementById('pf-save');
+  const elPfLogout       = document.getElementById('pf-logout');
+  const elPfMsg          = document.getElementById('pf-msg');
+  const elChatList       = document.getElementById('chatlist');
+
+  const elRoots          = document.getElementById('roots');
+  const elTreeList       = document.getElementById('treeList');
+
   // === UI persistent state (sidebar + tree) ===
   const UIKEY = 'ui.layout.v1';
   const ui = (() => {
@@ -568,33 +561,16 @@ WIDGET_HTML = """<!doctype html>
   })();
   function saveUI(){ localStorage.setItem(UIKEY, JSON.stringify(ui)); }
   function applyLayout(){
-    const rail = document.getElementById('rail');
-    const tree = document.getElementById('treePane');
-    const body = document.body;
-    if (rail){
-      rail.classList.toggle('collapsed', !ui.sidebarOpen);
-      body.classList.toggle('sidebar-closed', !ui.sidebarOpen);
-    }
-    if (tree){
-      tree.classList.toggle('collapsed', !ui.treeOpen);
-      body.classList.toggle('tree-closed', !ui.treeOpen);
-    }
+    document.body.classList.toggle('sidebar-closed', !ui.sidebarOpen);
+    document.body.classList.toggle('tree-closed',    !ui.treeOpen);
   }
 
-  // Wire buttons explicitly so they work reliably
-  function wireToggles(){
-    const btnRailCollapse = document.getElementById('btn-rail-collapse');
-    const btnRailOpen     = document.getElementById('btn-rail-open');
-    const btnTreeToggle   = document.getElementById('btn-tree-toggle');
-    const btnLeftToggle   = document.getElementById('btn-left-toggle');
-    const btnRightToggle  = document.getElementById('btn-right-toggle');
-
-    if (btnRailCollapse) btnRailCollapse.addEventListener('click', ()=>{ ui.sidebarOpen = false; saveUI(); applyLayout(); });
-    if (btnRailOpen)     btnRailOpen.addEventListener('click',     ()=>{ ui.sidebarOpen = true;  saveUI(); applyLayout(); });
-    if (btnTreeToggle)   btnTreeToggle.addEventListener('click',   ()=>{ ui.treeOpen    = !ui.treeOpen; saveUI(); applyLayout(); });
-    if (btnLeftToggle)   btnLeftToggle.addEventListener('click',   ()=>{ ui.sidebarOpen = !ui.sidebarOpen; saveUI(); applyLayout(); });
-    if (btnRightToggle)  btnRightToggle.addEventListener('click',  ()=>{ ui.treeOpen    = !ui.treeOpen; saveUI(); applyLayout(); });
-  }
+  // Wire buttons (explicit listeners)
+  if (elRailCollapse) elRailCollapse.addEventListener('click', ()=>{ ui.sidebarOpen=false; saveUI(); applyLayout(); });
+  if (elRailOpen)     elRailOpen.addEventListener('click',     ()=>{ ui.sidebarOpen=true;  saveUI(); applyLayout(); });
+  if (elTreeToggle)   elTreeToggle.addEventListener('click',   ()=>{ ui.treeOpen=!ui.treeOpen; saveUI(); applyLayout(); });
+  if (elLeftToggle)   elLeftToggle.addEventListener('click',   ()=>{ ui.sidebarOpen=!ui.sidebarOpen; saveUI(); applyLayout(); });
+  if (elRightToggle)  elRightToggle.addEventListener('click',  ()=>{ ui.treeOpen=!ui.treeOpen; saveUI(); applyLayout(); });
 
   // ====== State ======
   let currentChatId = null;
@@ -609,11 +585,9 @@ WIDGET_HTML = """<!doctype html>
     const r = Math.random()*16|0, v = c === 'x' ? r : (r&0x3|0x8); return v.toString(16);
   });
 
-  /**
-   * @typedef {{ id: string, rootId: string, parentId: (string|null), role: 'user'|'assistant'|'system', content: string, createdAt: string, children: string[], meta?: { title?: string, tags?: string[], chatId?: string } }} MessageNode
-   * @typedef {{ id: string, title: string, createdAt: string, firstNodeId: (string|null) }} ConversationRoot
-   * @typedef {{ roots: string[], nodesById: Record<string,MessageNode>, rootsById: Record<string,ConversationRoot>, currentRootId: (string|null), currentNodeId: (string|null) }} TreeIndex
-   */
+  /** @typedef {{ id:string, rootId:string, parentId:(string|null), role:'user'|'assistant'|'system', content:string, createdAt:string, children:string[], meta?:{ title?:string, tags?:string[], chatId?:string } }} MessageNode */
+  /** @typedef {{ id:string, title:string, createdAt:string, firstNodeId:(string|null) }} ConversationRoot */
+  /** @typedef {{ roots:string[], nodesById:Record<string,MessageNode>, rootsById:Record<string,ConversationRoot>, currentRootId:(string|null), currentNodeId:(string|null) }} TreeIndex */
 
   /** @type {TreeIndex} */
   let tree = (() => {
@@ -629,29 +603,21 @@ WIDGET_HTML = """<!doctype html>
     const id = uuidv4();
     tree.rootsById[id] = { id, title: title || 'Untitled Root', createdAt: new Date().toISOString(), firstNodeId: null };
     tree.roots.unshift(id);
-    tree.currentRootId = id;
-    tree.currentNodeId = null;
+    tree.currentRootId = id; tree.currentNodeId = null;
     saveTree(); renderTree();
     return id;
   }
   function newNode({rootId, parentId=null, role='user', content='', title}){
     const id = uuidv4();
-    const node = {
-      id, rootId, parentId, role, content,
-      createdAt: new Date().toISOString(), children: [],
-      meta: { title: title || undefined }
-    };
+    const node = { id, rootId, parentId, role, content, createdAt: new Date().toISOString(), children: [], meta:{ title: title || undefined } };
     tree.nodesById[id] = node;
     if (parentId){ tree.nodesById[parentId].children.push(id); }
-    const r = tree.rootsById[rootId];
-    if (!r.firstNodeId) r.firstNodeId = id;
+    const r = tree.rootsById[rootId]; if (!r.firstNodeId) r.firstNodeId = id;
     tree.currentNodeId = id;
     saveTree(); renderTree();
     return id;
   }
-  function selectRoot(rootId){
-    tree.currentRootId = rootId; saveTree(); renderTree();
-  }
+  function selectRoot(rootId){ tree.currentRootId = rootId; saveTree(); renderTree(); }
   function selectNode(nodeId){
     tree.currentNodeId = nodeId; saveTree(); renderTree();
     const node = tree.nodesById[nodeId];
@@ -665,25 +631,9 @@ WIDGET_HTML = """<!doctype html>
     const n = tree.nodesById[nodeId]; if (!n) return;
     n.meta = n.meta || {}; n.meta.chatId = chatId; saveTree();
   }
-  function labelFor(node){
-    return (node.meta && node.meta.title) || (node.content ? node.content.slice(0,80) : (node.role === 'assistant' ? 'Assistant' : 'User'));
-  }
+  function labelFor(node){ return (node.meta && node.meta.title) || (node.content ? node.content.slice(0,80) : (node.role === 'assistant' ? 'Assistant' : 'User')); }
 
-  // ====== Elements ======
-  const elThread  = document.getElementById('thread');
-  const elInput   = document.getElementById('input');
-  const elSend    = document.getElementById('send');
-  const elAttach  = document.getElementById('attach');
-  const elFile    = document.getElementById('file');
-  const elHint    = document.getElementById('filehint');
-  const elPfId    = document.getElementById('pf-id');
-  const elPfEmail = document.getElementById('pf-email');
-  const elPfSave  = document.getElementById('pf-save');
-  const elPfLogout= document.getElementById('pf-logout');
-  const elPfMsg   = document.getElementById('pf-msg');
-  const elChatList= document.getElementById('chatlist');
-  const elRoots   = document.getElementById('roots');
-  const elTreeList= document.getElementById('treeList');
+  // ====== Elements already grabbed above ======
 
   // Prefill profile inputs
   elPfId.value    = state.userId || '';
@@ -702,7 +652,6 @@ WIDGET_HTML = """<!doctype html>
 
   // ====== Tree Rendering ======
   function renderTree(){
-    // Roots
     if (elRoots){
       elRoots.innerHTML = '';
       (tree.roots || []).forEach(rid=>{
@@ -710,19 +659,17 @@ WIDGET_HTML = """<!doctype html>
         const b = document.createElement('button');
         b.className = 'btn' + (tree.currentRootId === rid ? ' primary' : '');
         b.textContent = r.title || 'Untitled Root';
-        b.title = 'Select root';
         b.addEventListener('click', ()=> selectRoot(rid));
         elRoots.appendChild(b);
       });
     }
-    // Nodes
     if (!tree.currentRootId){ elTreeList.innerHTML = '<div class="label">No root selected.</div>'; return; }
     const rootId = tree.currentRootId;
     const build = (id, depth) => {
       const node = tree.nodesById[id]; if (!node) return [];
       const row = document.createElement('div');
       row.className = 'tree-item ' + (tree.currentNodeId===id ? 'active' : '');
-      row.innerHTML = `<div class="node-row indent-${Math.min(depth,4)}">
+      row.innerHTML = `<div class="node-row" style="margin-left:${Math.min(depth,4)*14}px">
         <span>${labelFor(node)}</span>
         <div class="node-actions">
           <button class="btn" data-act="open" data-id="${id}">Open</button>
@@ -742,9 +689,7 @@ WIDGET_HTML = """<!doctype html>
       return out;
     };
     const top = [];
-    Object.values(tree.nodesById).forEach(n=>{
-      if (n.rootId === rootId && !n.parentId) top.push(n.id);
-    });
+    Object.values(tree.nodesById).forEach(n=>{ if (n.rootId === rootId && !n.parentId) top.push(n.id); });
     top.sort((a,b)=> new Date(tree.nodesById[a].createdAt) - new Date(tree.nodesById[b].createdAt));
     elTreeList.innerHTML = '';
     top.forEach(tid => build(tid, 0).forEach(el => elTreeList.appendChild(el)));
@@ -757,67 +702,19 @@ WIDGET_HTML = """<!doctype html>
     let h = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     h = h.replace(/```([\s\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
     h = h.replace(/`([^`]+?)`/g,'<code>$1</code>');
-    h = h.replace(/^######\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\s+(.*)$/gm,'<h5>$1</h5>').replace(/^####\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\s+(.*)$/gm,'<h3>$1</h3>').replace(/^##\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\s+(.*)$/gm,'<h1>$1</h1>');
-    h = h.replace(/^>\s?(.*)$/gm, '<blockquote>$1</blockquote>');
-    h = h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/__(.+?)__/g,'<strong>$1</strong>').replace(/\*(?!\s)(.+?)\*/g,'<em>$1</em>').replace(/_(?!\s)(.+?)_/g,'<em>$1</em>');
-    h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
-    h = h.replace(/(^|\s)(https?:\/\/[^\s<]+)(?=\s|$)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
-    h = h.replace(/(?:^|\n)(\d+)\.\s+(.+)(?:(?=\n\d+\.\s)|$)/gms,(m)=>{const items=m.trim().split(/\n(?=\d+\.\s)/).map(it=>it.replace(/^\d+\.\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ol>${items}</ol>`;});
-    h = h.replace(/(?:^|\n)[*-]\s+(.+)(?:(?=\n[*-]\s)|$)/gms,(m)=>{const items=m.trim().split(/\n(?=[*-]\s)/).map(it=>it.replace(/^[*-]\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ul>${items}</ul>`;});
-    h = h.replace(/\n{2,}/g,'</p><p>').replace(/^(?!<h\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
+    h = h.replace(/\n{2,}/g,'</p><p>');
     return h;
   }
-  function applyInlineFormatting(html){
-    if(!html) return ''; let out=String(html); const slots=[];
-    function protect(tag){ const re=new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`,'gi'); out=out.replace(re,m=>{const key=`__SLOT_${tag.toUpperCase()}_${slots.length}__`; slots.push({key,val:m}); return key;});}
-    protect('code'); protect('pre'); protect('a');
-    out = out.replace(/\*\*([^*]+?)\*\*/g,'<strong>$1</strong>')
-             .replace(/__([^_]+?)__/g,'<strong>$1</strong>')
-             .replace(/(^|[^*])\*([^*\n]+?)\*/g,'$1<em>$2</em>')
-             .replace(/(^|[^_])_([^_\n]+?)_/g,'$1<em>$2</em>');
-    for(const {key,val} of slots) out=out.replace(key, val);
-    return out;
-  }
-  function normalizeTrustDoc(html){
-    let out=html;
-    out=out.replace(/<p>\s*<strong>\s*([A-Z0-9][A-Z0-9\s\-&,.'()]+?)\s*<\/strong>\s*<\/p>/g,'<h2>$1</h2><p></p>');
-    const map=[{re:/<strong>\s*TRUST\s*NAME\s*:\s*<\/strong>/gi,rep:'Trust: '},{re:/<strong>\s*DATE\s*:\s*<\/strong>/gi,rep:'Date: '},{re:/<strong>\s*TAX\s*YEAR\s*:\s*<\/strong>/gi,rep:'Tax Year: '},{re:/<strong>\s*TRUSTEE\(S\)\s*:\s*<\/strong>/gi,rep:'Trustee(s): '},{re:/<strong>\s*LOCATION\s*:\s*<\/strong>/gi,rep:'Location: '}];
-    map.forEach(({re,rep})=>{ out=out.replace(re,rep) });
-    out=out.replace(/<strong>\s*([A-Za-z][A-Za-z()\s]+:)\s*<\/strong>\s*/g,'$1 ');
-    out=out.replace(/\*\*\s*TRUST\s*NAME\s*:\s*\*\*/gi,'Trust: ').replace(/\*\*\s*DATE\s*:\s*\*\*/gi,'Date: ').replace(/\*\*\s*TAX\s*YEAR\s*:\s*\*\*/gi,'Tax Year: ').replace(/\*\*\s*TRUSTEE\(S\)\s*:\s*\*\*/gi,'Trustee(s): ').replace(/\*\*\s*LOCATION\s*:\s*\*\*/gi,'Location: ');
-    return out;
-  }
+  function applyInlineFormatting(html){ return html || ''; }
+  function normalizeTrustDoc(html){ return html || ''; }
 
   // ====== Fetch helpers with headers ======
-  function hdrs(){
-    const h = {};
-    if (state.userId) h['X-User-Id'] = state.userId;
-    return h;
-  }
-  async function getJSON(url){
-    const r = await fetch(url, {headers: hdrs()});
-    if(!r.ok) throw new Error(url+': '+r.status);
-    return r.json();
-  }
-  async function postForm(url, form){
-    const r = await fetch(url, {method:'POST', headers: hdrs(), body: form});
-    if(!r.ok) throw new Error(url+': '+r.status);
-    return r.json();
-  }
-  async function del(url){
-    const r = await fetch(url, {method:'DELETE', headers: hdrs()});
-    if(!r.ok) throw new Error(url+': '+r.status);
-    return r.json();
-  }
+  function hdrs(){ const h = {}; if (state.userId) h['X-User-Id'] = state.userId; return h; }
+  async function getJSON(url){ const r = await fetch(url, {headers: hdrs()}); if(!r.ok) throw new Error(url+': '+r.status); return r.json(); }
+  async function postForm(url, form){ const r = await fetch(url, {method:'POST', headers: hdrs(), body: form}); if(!r.ok) throw new Error(url+': '+r.status); return r.json(); }
+  async function del(url){ const r = await fetch(url, {method:'DELETE', headers: hdrs()}); if(!r.ok) throw new Error(url+': '+r.status); return r.json(); }
 
   // ====== Profile save / logout ======
-  const elPfSave = document.getElementById('pf-save');
-  const elPfLogout = document.getElementById('pf-logout');
-  const elPfId = document.getElementById('pf-id');
-  const elPfEmail = document.getElementById('pf-email');
-  const elPfMsg = document.getElementById('pf-msg');
-  const elChatList = document.getElementById('chatlist');
-
   elPfSave.addEventListener('click', ()=>{
     const uid = elPfId.value.trim();
     const em  = elPfEmail.value.trim();
@@ -933,20 +830,6 @@ WIDGET_HTML = """<!doctype html>
     }
   }
 
-  // New chat
-  document.getElementById('btn-newchat').addEventListener('click', async ()=>{
-    if(!state.userId){ elPfMsg.textContent='Please enter Client ID and Save first.'; return; }
-    try{
-      const res  = await postForm('/chats', new FormData());
-      currentChatId = res.chat_id;
-      await loadChats();
-      elThread.innerHTML = '';
-      addMessage('advisor', '<p>New chat created. How may I assist?</p>');
-    }catch(e){
-      addMessage('advisor', `<p style="color:#b91c1c">Failed to create chat: ${e}</p>`);
-    }
-  });
-
   // ====== RAG calls ======
   function readInput(){
     const tmp = elInput.cloneNode(true);
@@ -977,23 +860,16 @@ WIDGET_HTML = """<!doctype html>
   async function handleSend(q){
     if(!state.userId){ elPfMsg.textContent='Please enter Client ID and Save first.'; return; }
     if(!q) return;
-    addMessage('user', q.replace(/\n/g,'<br>'));
-    // === Conversation Tree integration (ensure root/node, then append user node) ===
-    if (!tree.currentRootId){
-      newRoot('General');
-    }
+    addMessage('user', q.replace(/\\n/g,'<br>'));
+    if (!tree.currentRootId){ newRoot('General'); }
     if (!tree.currentNodeId){
       newNode({ rootId: tree.currentRootId, parentId: null, role: 'user', content: q, title: q.slice(0,80) });
     } else {
       const branchedId = branchFrom(tree.currentNodeId, q.slice(0,80));
-      if (branchedId){
-        const n = tree.nodesById[branchedId];
-        n.content = q; saveTree(); renderTree();
-      }
+      if (branchedId){ const n = tree.nodesById[branchedId]; n.content = q; saveTree(); renderTree(); }
     }
     const pendingNodeId = tree.currentNodeId;
 
-    // auto-title current chat with first message if unnamed
     if (currentChatId) {
       const fd = new FormData(); fd.append('title', q.slice(0, 60));
       postForm(`/chats/${currentChatId}/title`, fd).catch(()=>{});
@@ -1008,15 +884,12 @@ WIDGET_HTML = """<!doctype html>
       const files = Array.from(elFile.files || []);
       const data  = files.length ? await callReview(q, files, currentChatId) : await callRag(q, currentChatId);
       if (data && data.chat_id) currentChatId = data.chat_id;
-      loadChats(); // refresh list order
+      loadChats();
       if (pendingNodeId && currentChatId){ setNodeChat(pendingNodeId, currentChatId); }
 
       let html = (data && data.answer) ? data.answer : '';
-      const looksHtml = typeof html==='string' && /<\w+[^>]*>/.test(html);
-      let rendered = looksHtml ? html : mdToHtml(String(html||''));
-      rendered = applyInlineFormatting(rendered);
-      rendered = normalizeTrustDoc(rendered);
-
+      const looksHtml = typeof html==='string' && /<\\w+[^>]*>/.test(html);
+      let rendered = looksHtml ? html : mdToHtml(String(html||'')); rendered = applyInlineFormatting(rendered); rendered = normalizeTrustDoc(rendered);
       work.querySelector('.meta').textContent = 'Advisor · ' + now();
       work.querySelector('.bubble').outerHTML = `<div class="bubble">${rendered}</div>`;
     }catch(e){
@@ -1026,48 +899,31 @@ WIDGET_HTML = """<!doctype html>
   }
 
   // Send & attach events
-  const elInput = document.getElementById('input');
-  const elSend  = document.getElementById('send');
-  const elAttach= document.getElementById('attach');
-  const elFile  = document.getElementById('file');
-  const elHint  = document.getElementById('filehint');
-  const elThread= document.getElementById('thread');
-
   elInput.addEventListener('keydown', (ev)=>{
     if (ev.key === 'Enter' && !ev.shiftKey){
       ev.preventDefault();
-      const q = readInput();
-      if (!q) return;
+      const q = readInput(); if (!q) return;
       elInput.innerHTML = '';
       handleSend(q);
     }
   });
   elSend.addEventListener('click', ()=>{
-    const q = readInput();
-    if (!q) return;
+    const q = readInput(); if (!q) return;
     elInput.innerHTML = '';
     handleSend(q);
   });
   elAttach.addEventListener('click', ()=> elFile.click());
   elFile.addEventListener('change', ()=>{
-    if (elFile.files && elFile.files.length){
-      elHint.textContent = `${elFile.files.length} file${elFile.files.length>1?'s':''} selected.`;
-    }else{
-      elHint.textContent = 'State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.';
-    }
+    elHint.textContent = (elFile.files && elFile.files.length)
+      ? `${elFile.files.length} file${elFile.files.length>1?'s':''} selected.`
+      : 'State your inquiry to receive formal trust, fiduciary, and contractual analysis with strategic guidance.';
   });
 
-  // Init
+  // Init layout + tree + chats
   applyLayout();
-  wireToggles();
   renderTree();
-
-  // Initial load (if user was remembered)
-  if (state.userId) {
-    loadChats();
-  } else {
-    elThread.innerHTML = '<div class="msg advisor"><div class="meta">Advisor ·</div><div class="bubble"><p>Welcome. Enter your Client ID on the left and click “Save” to begin.</p></div></div>';
-  }
+  if (state.userId) { loadChats(); }
+  else { elThread.innerHTML = '<div class="msg advisor"><div class="meta">Advisor ·</div><div class="bubble"><p>Welcome. Enter your Client ID on the left and click “Save” to begin.</p></div></div>'; }
 </script>
 </body>
 </html>
@@ -1101,7 +957,7 @@ def diag():
         info["error"] = str(e)
     return info
 
-# ========== /search (RAW CONTEXT) ==========
+# ========== /search ==========
 @app.get("/search")
 def search_endpoint(
     question: str = Query(..., min_length=3),
@@ -1138,7 +994,7 @@ def search_endpoint(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-# ========== /rag (SYNTHESIS + PERSISTENCE) ==========
+# ========== /rag ==========
 @app.get("/rag")
 def rag_endpoint(
     question: str = Query(..., min_length=3),
@@ -1171,7 +1027,7 @@ def rag_endpoint(
     finally:
         conn.close()
 
-# ========== /review (PDF/TXT/DOCX) + PERSISTENCE ==========
+# ========== /review ==========
 @app.post("/review")
 def review_endpoint(
     authorization: Optional[str] = Header(None),
