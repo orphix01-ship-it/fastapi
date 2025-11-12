@@ -389,11 +389,19 @@ WIDGET_HTML = """<!doctype html>
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--font)}
-  /* Three-pane layout: [Left Rail] | [Main] | [Right Tree] */
+
+  /* Three-pane layout that actually collapses columns */
   .app{display:grid; grid-template-columns: 280px 1fr 320px; height:100vh; position:relative}
+  body.sidebar-closed .app{grid-template-columns: 0 1fr 320px}
+  body.tree-closed .app{grid-template-columns: 280px 1fr 0}
+  body.sidebar-closed.tree-closed .app{grid-template-columns: 0 1fr 0}
+
   .rail{border-right:1px solid var(--border); background:var(--rail); display:flex; flex-direction:column; position:relative}
-  .brand{padding:14px 16px; text-align:center; border-bottom:1px solid var(--border)}
-  .brand .title{font-family:var(--title); font-weight:300; font-size:18px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .rail.collapsed{overflow:hidden; border-right:none}
+
+  .brand{padding:14px 16px; border-bottom:1px solid var(--border)}
+  .brand .title{font-family:var(--title); font-weight:300; font-size:18px; white-space:nowrap}
+
   .section{padding:12px; border-bottom:1px solid var(--border)}
   .label{font-size:12px; color:#6b7280; margin-bottom:6px}
   .row{display:flex; gap:6px}
@@ -408,6 +416,8 @@ WIDGET_HTML = """<!doctype html>
   .chatitem.active{outline:2px solid #000}
 
   .main{display:flex; flex-direction:column}
+
+  /* Header/title removed per request */
 
   .content{flex:1; overflow:auto; padding:24px 12px 140px}
   .container{max-width:900px; margin:0 auto}
@@ -428,8 +438,10 @@ WIDGET_HTML = """<!doctype html>
   .bubble pre{background:#fff;color:#000;border:1px solid var(--border);padding:12px;border-radius:12px;overflow:auto}
   .bubble blockquote{border-left:3px solid #000;padding:6px 12px;margin:8px 0;background:#fafafa}
 
-  /* Composer */
-  .composer{position:fixed; left:280px; right:320px; bottom:0; background:#fff; padding:18px 12px; border-top:none}
+  /* Composer offsets adapt to sidebar/tree state */
+  .composer{position:fixed; left:280px; right:320px; bottom:0; background:#fff; padding:18px 12px; border-top:none; transition:left .18s ease-in-out, right .18s ease-in-out}
+  body.sidebar-closed .composer{left:0}
+  body.tree-closed .composer{right:0}
   .bar{display:flex; align-items:flex-end; gap:8px; background:#fff; border:1px solid var(--ring); border-radius:22px; padding:8px; box-shadow:var(--shadow); max-width:900px; margin:0 auto}
   .cin{flex:1; min-height:24px; max-height:160px; overflow:auto; outline:none; padding:8px 10px; font:16px/1.5 var(--font); color:#000}
   .cin:empty:before{content:attr(data-placeholder); color:#000}
@@ -453,14 +465,28 @@ WIDGET_HTML = """<!doctype html>
   .indent-2{margin-left:24px}
   .indent-3{margin-left:36px}
   .indent-4{margin-left:48px}
+
+  /* Top-right always-visible control buttons */
+  .top-controls{position:fixed; top:10px; right:10px; display:flex; gap:8px; z-index:40}
 </style>
 </head>
 <body>
+
+  <!-- Top-right always-visible controls -->
+  <div class="top-controls">
+    <button id="btn-left-toggle" class="btn" title="Toggle left sidebar" aria-label="Toggle left sidebar">☰</button>
+    <button id="btn-right-toggle" class="btn" title="Toggle conversation tree" aria-label="Toggle right panel">⟷</button>
+  </div>
+
   <div class="app">
     <!-- Left rail -->
     <aside class="rail" id="rail">
       <div class="brand">
         <div class="title">Private Trust Fiduciary Advisor</div>
+        <div style="margin-top:8px; display:flex; gap:8px">
+          <button id="btn-rail-collapse" class="btn" title="Collapse sidebar" aria-label="Collapse sidebar">Collapse</button>
+          <button id="btn-rail-open" class="btn" title="Open sidebar" aria-label="Open sidebar">Open</button>
+        </div>
       </div>
 
       <div class="section">
@@ -479,7 +505,7 @@ WIDGET_HTML = """<!doctype html>
       </div>
 
       <div class="section">
-        <div class="row" style="gap:8px">
+        <div class="row">
           <button id="btn-newchat" class="btn primary">New Chat</button>
         </div>
       </div>
@@ -490,6 +516,7 @@ WIDGET_HTML = """<!doctype html>
 
     <!-- Main pane -->
     <main class="main">
+      <!-- header removed -->
       <div class="content">
         <div class="container">
           <div id="thread" class="thread"></div>
@@ -502,8 +529,7 @@ WIDGET_HTML = """<!doctype html>
       <div class="tree-head">
         <div class="tree-title">Conversation Tree</div>
         <div class="tree-actions">
-          <button id="btn-tree-toggle" class="btn" title="Collapse/Expand tree" aria-label="Collapse/Expand tree">Toggle</button>
-          <button id="btn-new-root" class="btn primary" title="New root">New Root</button>
+          <button id="btn-tree-toggle" class="btn" title="Toggle tree" aria-label="Toggle tree">Toggle</button>
         </div>
       </div>
       <div class="tree-body">
@@ -533,33 +559,42 @@ WIDGET_HTML = """<!doctype html>
   </div>
 
 <script>
-  // ====== Layout state (tree only; sidebar collapse removed) ======
+  // === UI persistent state (sidebar + tree) ===
   const UIKEY = 'ui.layout.v1';
   const ui = (() => {
-    const def = { treeOpen: true };
+    const def = { sidebarOpen: true, treeOpen: true };
     try { return Object.assign(def, JSON.parse(localStorage.getItem(UIKEY) || '{}')); }
     catch(_){ return def; }
   })();
   function saveUI(){ localStorage.setItem(UIKEY, JSON.stringify(ui)); }
   function applyLayout(){
+    const rail = document.getElementById('rail');
     const tree = document.getElementById('treePane');
-    const composer = document.querySelector('.composer');
+    const body = document.body;
+    if (rail){
+      rail.classList.toggle('collapsed', !ui.sidebarOpen);
+      body.classList.toggle('sidebar-closed', !ui.sidebarOpen);
+    }
     if (tree){
-      if (ui.treeOpen){
-        tree.style.display = 'flex';
-        composer.style.right = '320px';
-      } else {
-        tree.style.display = 'none';
-        composer.style.right = '0';
-      }
+      tree.classList.toggle('collapsed', !ui.treeOpen);
+      body.classList.toggle('tree-closed', !ui.treeOpen);
     }
   }
-  // Tree toggle button
-  document.addEventListener('click', (e)=>{
-    if (e.target && e.target.id === 'btn-tree-toggle'){
-      ui.treeOpen = !ui.treeOpen; saveUI(); applyLayout();
-    }
-  });
+
+  // Wire buttons explicitly so they work reliably
+  function wireToggles(){
+    const btnRailCollapse = document.getElementById('btn-rail-collapse');
+    const btnRailOpen     = document.getElementById('btn-rail-open');
+    const btnTreeToggle   = document.getElementById('btn-tree-toggle');
+    const btnLeftToggle   = document.getElementById('btn-left-toggle');
+    const btnRightToggle  = document.getElementById('btn-right-toggle');
+
+    if (btnRailCollapse) btnRailCollapse.addEventListener('click', ()=>{ ui.sidebarOpen = false; saveUI(); applyLayout(); });
+    if (btnRailOpen)     btnRailOpen.addEventListener('click',     ()=>{ ui.sidebarOpen = true;  saveUI(); applyLayout(); });
+    if (btnTreeToggle)   btnTreeToggle.addEventListener('click',   ()=>{ ui.treeOpen    = !ui.treeOpen; saveUI(); applyLayout(); });
+    if (btnLeftToggle)   btnLeftToggle.addEventListener('click',   ()=>{ ui.sidebarOpen = !ui.sidebarOpen; saveUI(); applyLayout(); });
+    if (btnRightToggle)  btnRightToggle.addEventListener('click',  ()=>{ ui.treeOpen    = !ui.treeOpen; saveUI(); applyLayout(); });
+  }
 
   // ====== State ======
   let currentChatId = null;
@@ -649,7 +684,6 @@ WIDGET_HTML = """<!doctype html>
   const elChatList= document.getElementById('chatlist');
   const elRoots   = document.getElementById('roots');
   const elTreeList= document.getElementById('treeList');
-  const btnNewRoot= document.getElementById('btn-new-root');
 
   // Prefill profile inputs
   elPfId.value    = state.userId || '';
@@ -777,7 +811,14 @@ WIDGET_HTML = """<!doctype html>
   }
 
   // ====== Profile save / logout ======
-  document.getElementById('pf-save').addEventListener('click', ()=>{
+  const elPfSave = document.getElementById('pf-save');
+  const elPfLogout = document.getElementById('pf-logout');
+  const elPfId = document.getElementById('pf-id');
+  const elPfEmail = document.getElementById('pf-email');
+  const elPfMsg = document.getElementById('pf-msg');
+  const elChatList = document.getElementById('chatlist');
+
+  elPfSave.addEventListener('click', ()=>{
     const uid = elPfId.value.trim();
     const em  = elPfEmail.value.trim();
     if(!uid){ elPfMsg.textContent='Client ID is required.'; return; }
@@ -790,7 +831,7 @@ WIDGET_HTML = """<!doctype html>
     loadChats();
   });
 
-  document.getElementById('pf-logout').addEventListener('click', ()=>{
+  elPfLogout.addEventListener('click', ()=>{
     localStorage.removeItem('userId');
     localStorage.removeItem('email');
     state.userId = '';
@@ -906,19 +947,11 @@ WIDGET_HTML = """<!doctype html>
     }
   });
 
-  // === New Root button (fix: wire up) ===
-  if (btnNewRoot){
-    btnNewRoot.addEventListener('click', ()=>{
-      const title = prompt('Root title (e.g., "Client: Chris Glick")') || 'Untitled Root';
-      newRoot(title);
-    });
-  }
-
   // ====== RAG calls ======
   function readInput(){
     const tmp = elInput.cloneNode(true);
     tmp.querySelectorAll('div').forEach(d=>{ if (d.innerHTML === "<br>") d.innerHTML = "\\n"; });
-    return tmp.innerText.replace(/\u00A0/g,' ').trim();
+    return tmp.innerText.replace(/\\u00A0/g,' ').trim();
   }
 
   async function callRag(q, chatId){
@@ -947,14 +980,11 @@ WIDGET_HTML = """<!doctype html>
     addMessage('user', q.replace(/\n/g,'<br>'));
     // === Conversation Tree integration (ensure root/node, then append user node) ===
     if (!tree.currentRootId){
-      // auto-create a default root on first send if none exists
       newRoot('General');
     }
-    // If there's no active node, start a new top-level node with this prompt
     if (!tree.currentNodeId){
       newNode({ rootId: tree.currentRootId, parentId: null, role: 'user', content: q, title: q.slice(0,80) });
     } else {
-      // If active node exists, branch under it for this new prompt
       const branchedId = branchFrom(tree.currentNodeId, q.slice(0,80));
       if (branchedId){
         const n = tree.nodesById[branchedId];
@@ -979,7 +1009,6 @@ WIDGET_HTML = """<!doctype html>
       const data  = files.length ? await callReview(q, files, currentChatId) : await callRag(q, currentChatId);
       if (data && data.chat_id) currentChatId = data.chat_id;
       loadChats(); // refresh list order
-      // Link active tree node with this chatId
       if (pendingNodeId && currentChatId){ setNodeChat(pendingNodeId, currentChatId); }
 
       let html = (data && data.answer) ? data.answer : '';
@@ -997,6 +1026,13 @@ WIDGET_HTML = """<!doctype html>
   }
 
   // Send & attach events
+  const elInput = document.getElementById('input');
+  const elSend  = document.getElementById('send');
+  const elAttach= document.getElementById('attach');
+  const elFile  = document.getElementById('file');
+  const elHint  = document.getElementById('filehint');
+  const elThread= document.getElementById('thread');
+
   elInput.addEventListener('keydown', (ev)=>{
     if (ev.key === 'Enter' && !ev.shiftKey){
       ev.preventDefault();
@@ -1021,8 +1057,9 @@ WIDGET_HTML = """<!doctype html>
     }
   });
 
-  // Initial layout + tree render
+  // Init
   applyLayout();
+  wireToggles();
   renderTree();
 
   // Initial load (if user was remembered)
