@@ -1,4 +1,4 @@
-# trust_rag_api.py 
+# trust_rag_api.py
 from fastapi import FastAPI, Query, Header, HTTPException, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -147,8 +147,7 @@ def _clean_openai_key(raw: str) -> str:
     s = (raw or "").strip()
     if not s.startswith("sk-"):
         parts = [t.strip() for t in s.replace("=", " ").split() if t.strip().startswith("sk-")]
-        if parts:
-            s = parts[-1]
+        if parts: s = parts[-1]
     if not s.startswith("sk-"):
         raise RuntimeError("OPENAI_API_KEY appears malformed.")
     return s
@@ -201,8 +200,7 @@ def _titles_only(uniq_sources: List[Dict[str, Any]]) -> List[str]:
     for s in uniq_sources:
         t = s["title"]
         if t not in seen:
-            seen.add(t)
-            out.append(t)
+            seen.add(t); out.append(t)
     return out
 
 # ========== SYNTHESIS ==========
@@ -219,13 +217,10 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
     buf, used, kept = [], 0, 0
     for s in snippets:
         s = s.strip()
-        if not s:
-            continue
-        if used + len(s) > MAX_CONTEXT_CHARS:
-            break
+        if not s: continue
+        if used + len(s) > MAX_CONTEXT_CHARS: break
         buf.append(s); used += len(s); kept += 1
-        if kept >= MAX_SNIPPETS:
-            break
+        if kept >= MAX_SNIPPETS: break
     context = "\n---\n".join(buf)
 
     titles = _titles_only(uniq_sources)
@@ -395,14 +390,14 @@ WIDGET_HTML = """<!doctype html>
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--font)}
   /* Three-pane layout: [Left Rail] | [Main] | [Right Tree] */
-  .app{display:grid; grid-template-columns: 280px 1fr 340px; height:100vh; position:relative}
-  .rail{border-right:1px solid var(--border); background:var(--rail); display:flex; flex-direction:column; position:relative; transition:width .18s ease-in-out; min-width:0}
+  .app{display:grid; grid-template-columns: 280px 1fr 320px; height:100vh; position:relative}
+  .rail{border-right:1px solid var(--border); background:var(--rail); display:flex; flex-direction:column; position:relative; transition:width .18s ease-in-out}
   .rail.collapsed{width:0; min-width:0; overflow:hidden; border-right:none}
   /* Always-visible reopen tab / logo on left edge */
   .left-tab{position:fixed; left:0; top:12px; width:12px; height:48px; border:1px solid var(--border); border-left:none; border-radius:0 10px 10px 0; background:#fff; box-shadow:var(--shadow); display:flex; align-items:center; justify-content:center; cursor:pointer; z-index:30}
   .left-tab .bar{width:2px; height:22px; background:#000; border-radius:2px}
-  .brand{padding:14px 16px; text-align:left; border-bottom:1px solid var(--border)}
-  .brand .title{font-family:var(--title); font-weight:300; font-size:18px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:block}
+  .brand{padding:14px 16px; text-align:center; border-bottom:1px solid var(--border)}
+  .brand .title{font-family:var(--title); font-weight:300; font-size:18px}
   .brand-row{display:flex; align-items:center; justify-content:space-between}
   .brand-btn{cursor:pointer; border:1px solid var(--border); background:#fff; color:#000; padding:6px 10px; border-radius:10px}
   .section{padding:12px; border-bottom:1px solid var(--border)}
@@ -442,7 +437,7 @@ WIDGET_HTML = """<!doctype html>
   .bubble blockquote{border-left:3px solid #000;padding:6px 12px;margin:8px 0;background:#fafafa}
 
   /* Composer offsets adapt to sidebar/tree state */
-  .composer{position:fixed; left:280px; right:340px; bottom:0; background:#fff; padding:18px 12px; border-top:none; transition:left .18s ease-in-out, right .18s ease-in-out}
+  .composer{position:fixed; left:280px; right:320px; bottom:0; background:#fff; padding:18px 12px; border-top:none; transition:left .18s ease-in-out, right .18s ease-in-out}
   body.sidebar-closed .composer{left:0}
   body.tree-closed .composer{right:0}
   .bar{display:flex; align-items:flex-end; gap:8px; background:#fff; border:1px solid var(--ring); border-radius:22px; padding:8px; box-shadow:var(--shadow); max-width:900px; margin:0 auto}
@@ -453,11 +448,11 @@ WIDGET_HTML = """<!doctype html>
   #file{display:none}
 
   /* Right-side Conversation Tree panel */
-  .tree{border-left:1px solid var(--border); background:#fff; display:flex; flex-direction:column; overflow:hidden; min-width:0}
+  .tree{border-left:1px solid var(--border); background:#fff; display:flex; flex-direction:column; overflow:hidden}
   .tree.collapsed{width:0; min-width:0; border-left:none}
-  .tree-head{display:flex; align-items:center; justify-content:space-between; padding:14px 16px; border-bottom:1px solid var(--border)}
+  .tree-head{display:flex; align-items:center; justify-content:space-between; padding:12px 12px; border-bottom:1px solid var(--border)}
   .tree-title{font-weight:600}
-  .tree-body{flex:1; overflow:auto; padding:14px 16px}
+  .tree-body{flex:1; overflow:auto; padding:10px}
   .tree-actions{display:flex; gap:6px}
   .tree-item{padding:6px 8px; border-radius:8px; cursor:pointer}
   .tree-item:hover{background:#fafafa}
@@ -557,6 +552,39 @@ WIDGET_HTML = """<!doctype html>
   </div>
 
 <script>
+  // === UI persistent state (sidebar + tree) ===
+  const UIKEY = 'ui.layout.v1';
+  const ui = (() => {
+    const def = { sidebarOpen: true, treeOpen: true };
+    try { return Object.assign(def, JSON.parse(localStorage.getItem(UIKEY) || '{}')); }
+    catch(_){ return def; }
+  })();
+  function saveUI(){ localStorage.setItem(UIKEY, JSON.stringify(ui)); }
+  function applyLayout(){
+    const rail = document.getElementById('rail');
+    const tree = document.getElementById('treePane');
+    const body = document.body;
+    if (rail){
+      rail.classList.toggle('collapsed', !ui.sidebarOpen);
+      body.classList.toggle('sidebar-closed', !ui.sidebarOpen);
+    }
+    if (tree){
+      tree.classList.toggle('collapsed', !ui.treeOpen);
+      body.classList.toggle('tree-closed', !ui.treeOpen);
+    }
+  }
+  document.addEventListener('click', (e)=>{
+    if (e.target && e.target.id === 'btn-rail-collapse'){
+      ui.sidebarOpen = false; saveUI(); applyLayout();
+    }
+    if (e.target && e.target.id === 'left-tab'){
+      ui.sidebarOpen = true; saveUI(); applyLayout();
+    }
+    if (e.target && e.target.id === 'btn-tree-toggle'){
+      ui.treeOpen = !ui.treeOpen; saveUI(); applyLayout();
+    }
+  });
+
   // ====== State ======
   let currentChatId = null;
   let state = {
@@ -714,38 +742,38 @@ WIDGET_HTML = """<!doctype html>
   // ====== Formatting helpers ======
   function mdToHtml(md){
     if(!md) return '';
-    if (/<\w+[^>]*>/.test(md)) return md;
+    if (/<\\w+[^>]*>/.test(md)) return md;
     let h = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    h = h.replace(/```([\s\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
+    h = h.replace(/```([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c.replace(/</g,'&lt;')}</code></pre>`);
     h = h.replace(/`([^`]+?)`/g,'<code>$1</code>');
-    h = h.replace(/^######\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\s+(.*)$/gm,'<h5>$1</h5>').replace(/^####\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\s+(.*)$/gm,'<h3>$1</h3>').replace(/^##\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\s+(.*)$/gm,'<h1>$1</h1>');
-    h = h.replace(/^>\s?(.*)$/gm, '<blockquote>$1</blockquote>');
-    h = h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/__(.+?)__/g,'<strong>$1</strong>').replace(/\*(?!\s)(.+?)\*/g,'<em>$1</em>').replace(/_(?!\s)(.+?)_/g,'<em>$1</em>');
-    h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
-    h = h.replace(/(^|\s)(https?:\/\/[^\s<]+)(?=\s|$)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
-    h = h.replace(/(?:^|\n)(\d+)\.\s+(.+)(?:(?=\n\d+\.\s)|$)/gms,(m)=>{const items=m.trim().split(/\n(?=\d+\.\s)/).map(it=>it.replace(/^\d+\.\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ol>${items}</ol>`;});
-    h = h.replace(/(?:^|\n)[*-]\s+(.+)(?:(?=\n[*-]\s)|$)/gms,(m)=>{const items=m.trim().split(/\n(?=[*-]\s)/).map(it=>it.replace(/^[*-]\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ul>${items}</ul>`;});
-    h = h.replace(/\n{2,}/g,'</p><p>').replace(/^(?!<h\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
+    h = h.replace(/^######\\s+(.*)$/gm,'<h6>$1</h6>').replace(/^#####\\s+(.*)$/gm,'<h5>$1</h5>').replace(/^####\\s+(.*)$/gm,'<h4>$1</h4>').replace(/^###\\s+(.*)$/gm,'<h3>$1</h3>').replace(/^##\\s+(.*)$/gm,'<h2>$1</h2>').replace(/^#\\s+(.*)$/gm,'<h1>$1</h1>');
+    h = h.replace(/^>\\s?(.*)$/gm, '<blockquote>$1</blockquote>');
+    h = h.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>').replace(/__(.+?)__/g,'<strong>$1</strong>').replace(/\\*(?!\\s)(.+?)\\*/g,'<em>$1</em>').replace(/_(?!\\s)(.+?)_/g,'<em>$1</em>');
+    h = h.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+    h = h.replace(/(^|\\s)(https?:\\/\\/[^\\s<]+)(?=\\s|$)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    h = h.replace(/(?:^|\\n)(\\d+)\\.\\s+(.+)(?:(?=\\n\\d+\\.\\s)|$)/gms,(m)=>{const items=m.trim().split(/\\n(?=\\d+\\.\\s)/).map(it=>it.replace(/^\\d+\\.\\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ol>${items}</ol>`;});
+    h = h.replace(/(?:^|\\n)[*-]\\s+(.+)(?:(?=\\n[*-]\\s)|$)/gms,(m)=>{const items=m.trim().split(/\\n(?=[*-]\\s)/).map(it=>it.replace(/^[*-]\\s+/,'')).map(t=>`<li>${t}</li>`).join('');return `<ul>${items}</ul>`;});
+    h = h.replace(/\\n{2,}/g,'</p><p>').replace(/^(?!<h\\d|<ul|<ol|<pre|<hr|<p|<blockquote|<table)(.+)$/gm,'<p>$1</p>');
     return h;
   }
   function applyInlineFormatting(html){
     if(!html) return ''; let out=String(html); const slots=[];
-    function protect(tag){ const re=new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`,'gi'); out=out.replace(re,m=>{const key=`__SLOT_${tag.toUpperCase()}_${slots.length}__`; slots.push({key,val:m}); return key;});}
+    function protect(tag){ const re=new RegExp(`<${tag}\\\\b[^>]*>[\\\\s\\\\S]*?<\\\\/${tag}>`,'gi'); out=out.replace(re,m=>{const key=`__SLOT_${tag.toUpperCase()}_${slots.length}__`; slots.push({key,val:m}); return key;});}
     protect('code'); protect('pre'); protect('a');
-    out = out.replace(/\*\*([^*]+?)\*\*/g,'<strong>$1</strong>')
+    out = out.replace(/\\*\\*([^*]+?)\\*\\*/g,'<strong>$1</strong>')
              .replace(/__([^_]+?)__/g,'<strong>$1</strong>')
-             .replace(/(^|[^*])\*([^*\n]+?)\*/g,'$1<em>$2</em>')
-             .replace(/(^|[^_])_([^_\n]+?)_/g,'$1<em>$2</em>');
+             .replace(/(^|[^*])\\*([^*\\n]+?)\\*/g,'$1<em>$2</em>')
+             .replace(/(^|[^_])_([^_\\n]+?)_/g,'$1<em>$2</em>');
     for(const {key,val} of slots) out=out.replace(key, val);
     return out;
   }
   function normalizeTrustDoc(html){
     let out=html;
-    out=out.replace(/<p>\s*<strong>\s*([A-Z0-9][A-Z0-9\s\-&,.'()]+?)\s*<\/strong>\s*<\/p>/g,'<h2>$1</h2><p></p>');
-    const map=[{re:/<strong>\s*TRUST\s*NAME\s*:\s*<\/strong>/gi,rep:'Trust: '},{re:/<strong>\s*DATE\s*:\s*<\/strong>/gi,rep:'Date: '},{re:/<strong>\s*TAX\s*YEAR\s*:\s*<\/strong>/gi,rep:'Tax Year: '},{re:/<strong>\s*TRUSTEE\(S\)\s*:\s*<\/strong>/gi,rep:'Trustee(s): '},{re:/<strong>\s*LOCATION\s*:\s*<\/strong>/gi,rep:'Location: '}];
+    out=out.replace(/<p>\\s*<strong>\\s*([A-Z0-9][A-Z0-9\\s\\-&,.'()]+?)\\s*<\\/strong>\\s*<\\/p>/g,'<h2>$1</h2><p></p>');
+    const map=[{re:/<strong>\\s*TRUST\\s*NAME\\s*:\\s*<\\/strong>/gi,rep:'Trust: '},{re:/<strong>\\s*DATE\\s*:\\s*<\\/strong>/gi,rep:'Date: '},{re:/<strong>\\s*TAX\\s*YEAR\\s*:\\s*<\\/strong>/gi,rep:'Tax Year: '},{re:/<strong>\\s*TRUSTEE\\(S\\)\\s*:\\s*<\\/strong>/gi,rep:'Trustee(s): '},{re:/<strong>\\s*LOCATION\\s*:\\s*<\\/strong>/gi,rep:'Location: '}];
     map.forEach(({re,rep})=>{ out=out.replace(re,rep) });
-    out=out.replace(/<strong>\s*([A-Za-z][A-Za-z()\s]+:)\s*<\/strong>\s*/g,'$1 ');
-    out=out.replace(/\*\*\s*TRUST\s*NAME\s*:\s*\*\*/gi,'Trust: ').replace(/\*\*\s*DATE\s*:\s*\*\*/gi,'Date: ').replace(/\*\*\s*TAX\s*YEAR\s*:\s*\*\*/gi,'Tax Year: ').replace(/\*\*\s*TRUSTEE\(S\)\s*:\s*\*\*/gi,'Trustee(s): ').replace(/\*\*\s*LOCATION\s*:\s*\*\*/gi,'Location: ');
+    out=out.replace(/<strong>\\s*([A-Za-z][A-Za-z()\\s]+:)\\s*<\\/strong>\\s*/g,'$1 ');
+    out=out.replace(/\\*\\*\\s*TRUST\\s*NAME\\s*:\\s*\\*\\*/gi,'Trust: ').replace(/\\*\\*\\s*DATE\\s*:\\s*\\*\\*/gi,'Date: ').replace(/\\*\\*\\s*TAX\\s*YEAR\\s*:\\s*\\*\\*/gi,'Tax Year: ').replace(/\\*\\*\\s*TRUSTEE\\(S\\)\\s*:\\s*\\*\\*/gi,'Trustee(s): ').replace(/\\*\\*\\s*LOCATION\\s*:\\s*\\*\\*/gi,'Location: ');
     return out;
   }
 
@@ -1008,39 +1036,9 @@ WIDGET_HTML = """<!doctype html>
     }
   });
 
-  // === Robust UI toggle wiring (explicit listeners; no delegation) ===
-  (function(){
-    const UIKEY = 'ui.layout.v1';
-    const ui = (() => {
-      try { return Object.assign({ sidebarOpen:true, treeOpen:true }, JSON.parse(localStorage.getItem(UIKEY) || '{}')); }
-      catch(_) { return { sidebarOpen:true, treeOpen:true }; }
-    })();
-
-    const rail = document.getElementById('rail');
-    const tree = document.getElementById('treePane');
-    const btnRailCollapse = document.getElementById('btn-rail-collapse');
-    const leftTab = document.getElementById('left-tab');
-    const btnTreeToggle = document.getElementById('btn-tree-toggle');
-
-    function saveUI(){ localStorage.setItem(UIKEY, JSON.stringify(ui)); }
-    function applyLayout(){
-      if (rail){
-        rail.classList.toggle('collapsed', !ui.sidebarOpen);
-        document.body.classList.toggle('sidebar-closed', !ui.sidebarOpen);
-      }
-      if (tree){
-        tree.classList.toggle('collapsed', !ui.treeOpen);
-        document.body.classList.toggle('tree-closed', !ui.treeOpen);
-      }
-    }
-
-    btnRailCollapse && btnRailCollapse.addEventListener('click', ()=>{ ui.sidebarOpen = False || False; ui.sidebarOpen = False; saveUI(); applyLayout(); });
-    leftTab        && leftTab.addEventListener('click',          ()=>{ ui.sidebarOpen = true;  saveUI(); applyLayout(); });
-    btnTreeToggle  && btnTreeToggle.addEventListener('click',    ()=>{ ui.treeOpen    = !ui.treeOpen; saveUI(); applyLayout(); });
-
-    // Initial layout
-    applyLayout();
-  })();
+  // Apply initial layout + render tree once
+  applyLayout();
+  renderTree();
 
   // Initial load (if user was remembered)
   if (state.userId) {
