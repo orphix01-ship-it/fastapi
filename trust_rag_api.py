@@ -1219,3 +1219,117 @@ def review_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         conn.close()
+
+# ======================================================
+# /draft — generate full HTML fiduciary resolution
+# ======================================================
+
+from fastapi import Request, HTTPException
+import os, httpx
+
+@app.post("/draft")
+async def draft(request: Request):
+    """
+    Private Fiduciary Advisor API
+    1. Receives a question or form payload from Zapier/Motion.io.
+    2. Calls /rag to gather legal citations via FCT Advisor (Pinecone retrieval).
+    3. Calls OpenAI using your Fiduciary system prompt.
+    4. Returns a comprehensive, HTML-formatted trustee resolution.
+    """
+
+    # ---------- 1️⃣ Extract trustee input ----------
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid or missing JSON body.")
+
+    question = data.get("question", "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Missing 'question' field.")
+
+    # ---------- 2️⃣ Query the /rag endpoint ----------
+    rag_url = "https://api.fctadvisor.com/rag"
+    fct_token = os.environ.get("FCT_TOKEN", "")
+    async with httpx.AsyncClient(timeout=60) as client:
+        rag = await client.get(
+            rag_url,
+            params={"question": question},
+            headers={"Authorization": f"Bearer {fct_token}"} if fct_token else None,
+        )
+
+    if rag.status_code != 200:
+        raise HTTPException(status_code=rag.status_code, detail=f"RAG call failed: {rag.text}")
+
+    rag_json = rag.json()
+    sources = rag_json.get("sources", [])
+    src_text = "\n".join(
+        [f"{s.get('title','')} (L{s.get('level','')}, p.{s.get('page','')})"
+         for s in sources]
+    )
+
+    # ---------- 3️⃣ Compose composite prompt ----------
+    system_prompt = os.environ.get("FIDUCIARY_SYSTEM_PROMPT", "").strip()
+    model = os.environ.get("SYNTH_MODEL", "gpt-4o")
+    max_tokens = int(os.environ.get("MAX_OUT_TOKENS", "16384"))
+
+    # Combine the system prompt, citations, and user question into a single detailed request.
+    draft_instructions = f"""
+{system_prompt}
+
+Use the following citations where applicable:
+{src_text}
+
+The trustee request is:
+{question}
+
+Produce a comprehensive, legally formatted trustee resolution in rich HTML.
+
+Requirements:
+• Write as if by an experienced fiduciary attorney preparing an official trust record.
+• Include clear HTML structure: <h1> title, <h2> section headings, <p> narrative paragraphs, and <ul>/<li> lists for details.
+• Sections to include, in order:
+   1. Title of the resolution
+   2. Date and Location
+   3. Trust Details — name, type, situs/jurisdiction, trustee(s)
+   4. Recitals (“WHEREAS” clauses)
+   5. Resolution Section — detailed authorization
+   6. Legal Basis and References — integrate citations from the sources above
+   7. Execution Section — closing paragraph and signature block.
+• Only include sections for which data is available.
+• Do not insert underscores or placeholders for missing data.
+• Output must be valid, styled HTML ready for web display.
+"""
+
+    # ---------- 4️⃣ Send to OpenAI ----------
+    headers = {
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY','')}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": model,
+        "temperature": 0.3,
+        "max_tokens": max_tokens,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": draft_instructions},
+        ],
+    }
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        gpt = await client.post("https://api.openai.com/v1/chat/completions",
+                                headers=headers, json=payload)
+
+    if gpt.status_code != 200:
+        raise HTTPException(status_code=gpt.status_code,
+                            detail=f"OpenAI call failed: {gpt.text}")
+
+    gpt_json = gpt.json()
+    answer = gpt_json["choices"][0]["message"]["content"]
+
+    # ---------- 5️⃣ Return structured JSON to Zapier ----------
+    return {
+        "answer": answer,       # the HTML resolution text
+        "sources": sources,     # citation metadata from RAG
+        "model": model,
+    }
