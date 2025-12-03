@@ -1270,7 +1270,7 @@ async def draft(request: Request):
     # ---------- 3️⃣ Compose composite prompt ----------
     system_prompt = os.environ.get("FIDUCIARY_SYSTEM_PROMPT", "").strip()
     model = os.environ.get("SYNTH_MODEL", "gpt-4o")
-    max_tokens = int(os.environ.get("MAX_OUT_TOKENS", "16384"))
+    max_tokens = int(os.environ.get("MAX_OUT_TOKENS", "20000"))
 
     # Combine the system prompt, citations, and user question into a single detailed request.
     draft_instructions = f"""
@@ -1402,7 +1402,7 @@ async def chat(request: Request):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": composite_prompt},
         ],
-        "max_tokens": int(os.environ.get("MAX_OUT_TOKENS", "4096"))
+        "max_tokens": int(os.environ.get("MAX_OUT_TOKENS", "20000"))
     }
 
     async with httpx.AsyncClient(timeout=120) as client:
