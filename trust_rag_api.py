@@ -1333,3 +1333,87 @@ Requirements:
         "sources": sources,     # citation metadata from RAG
         "model": model,
     }
+
+# ======================================================
+# /chat — conversational fiduciary advisor endpoint
+# ======================================================
+from fastapi import Request, HTTPException
+import os, httpx
+
+@app.post("/chat")
+async def chat(request: Request):
+    """
+    Acts like your Private Fiduciary Advisor GPT:
+    conversational Q&A using RAG context + system prompt.
+    """
+
+    data = await request.json()
+    message = data.get("message", "").strip()
+    thread_id = data.get("thread_id", "default")
+
+    if not message:
+        raise HTTPException(status_code=400, detail="Missing 'message' field.")
+
+    # 1️⃣  Get authoritative citations from /rag
+    fct_token = os.environ.get("FCT_TOKEN", "")
+    async with httpx.AsyncClient(timeout=60) as client:
+        rag = await client.get(
+            "https://api.fctadvisor.com/rag",
+            params={"question": message},
+            headers={"Authorization": f"Bearer {fct_token}"}
+        )
+
+    if rag.status_code != 200:
+        raise HTTPException(status_code=rag.status_code, detail=f"RAG call failed: {rag.text}")
+
+    rag_json = rag.json()
+    sources = rag_json.get("sources", [])
+    src_text = "\n".join([f"{s.get('title','')} (L{s.get('level','')}, p.{s.get('page','')})"
+                          for s in sources])
+
+    # 2️⃣  Build prompt exactly like your custom GPT
+    system_prompt = os.environ.get("FIDUCIARY_SYSTEM_PROMPT", "")
+    model = os.environ.get("SYNTH_MODEL", "gpt-4o")
+
+    composite_prompt = f"""
+    {system_prompt}
+
+    Use these citations where relevant:
+    {src_text}
+
+    Question:
+    {message}
+
+    Respond as the Private Fiduciary Advisor: formal, clear, authoritative, 
+    but conversational.  Include citations inline where appropriate 
+    (e.g., IRC §642(c)(2); Treas. Reg. §1.642(c)-2).  
+    Answer in full sentences, not bullet points unless listing authorities.
+    """
+
+    headers = {
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY','')}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": model,
+        "temperature": 0.3,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": composite_prompt},
+        ],
+        "max_tokens": int(os.environ.get("MAX_OUT_TOKENS", "4096"))
+    }
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        gpt = await client.post("https://api.openai.com/v1/chat/completions",
+                                headers=headers, json=payload)
+
+    if gpt.status_code != 200:
+        raise HTTPException(status_code=gpt.status_code,
+                            detail=f"OpenAI call failed: {gpt.text}")
+
+    gpt_json = gpt.json()
+    answer = gpt_json["choices"][0]["message"]["content"]
+
+    return {"answer": answer, "sources": sources, "thread_id": thread_id}
