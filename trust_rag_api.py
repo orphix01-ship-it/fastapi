@@ -578,7 +578,12 @@ WIDGET_HTML = r"""<!doctype html>
   .tree-pane{ border-left: 1px solid var(--border) }
   body.sidebar-closed .rail, body.tree-closed .tree-pane{ border-color: transparent; opacity: 0; pointer-events: none }
 
-  .main{ display: flex; flex-direction: column; min-width: 0; background: var(--bg) }
+  .main{
+    display: flex; flex-direction: column;
+    min-width: 0; min-height: 0;
+    overflow: hidden;
+    background: var(--bg);
+  }
 
   /* ============ Edge reopen tabs ============ */
   .edge-tab{
@@ -728,7 +733,7 @@ WIDGET_HTML = r"""<!doctype html>
   }
   .main-title .muted{ color: var(--text-subtle); font-weight: 400 }
 
-  .thread-scroll{ flex: 1; overflow: auto; scroll-behavior: smooth }
+  .thread-scroll{ flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; -webkit-overflow-scrolling: touch }
   .thread{
     max-width: 860px; margin: 0 auto;
     padding: 32px 20px 180px;
@@ -1056,6 +1061,114 @@ WIDGET_HTML = r"""<!doctype html>
   .modal-actions{ display: flex; justify-content: flex-end; gap: 8px }
   @keyframes fadeIn{ from{ opacity: 0 } to{ opacity: 1 } }
 
+  /* ============ Graph view ============ */
+  .graph-root{
+    position: fixed; inset: 0;
+    display: none; flex-direction: column;
+    background: var(--bg);
+    z-index: 80;
+    animation: fadeIn .18s ease;
+  }
+  .graph-root.show{ display: flex }
+  .graph-head{
+    height: 64px; padding: 0 20px;
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  .graph-title{
+    font-family: var(--font-brand);
+    font-weight: 500; font-size: 17px; letter-spacing: .08em;
+  }
+  .graph-sub{ color: var(--text-subtle); font-size: 11.5px; letter-spacing: .02em; margin-top: 2px }
+  .graph-actions{ display: flex; align-items: center; gap: 4px }
+  .graph-sep{ width: 1px; height: 22px; background: var(--border); margin: 0 6px }
+  .graph-stage{
+    flex: 1; min-height: 0; position: relative;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0) 0 0/24px 24px,
+      var(--bg);
+    cursor: grab;
+  }
+  .graph-stage.dragging{ cursor: grabbing }
+  .graph-svg{ width: 100%; height: 100%; display: block; user-select: none; }
+  .graph-empty{
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text-subtle); font-size: 14px;
+    pointer-events: none;
+  }
+  .graph-empty.hide{ display: none }
+
+  /* graph edges */
+  .graph-edge{ fill: none; stroke: var(--border); stroke-width: 1.5 }
+  .graph-edge.in-path{ stroke: var(--accent); stroke-width: 2 }
+
+  /* graph nodes */
+  .graph-node{ cursor: pointer; transition: transform .15s ease }
+  .graph-node:hover{ transform: translateZ(0) }
+  .graph-node .node-bg{
+    fill: var(--surface);
+    stroke: var(--border);
+    stroke-width: 1.5;
+    transition: stroke .15s, stroke-width .15s, filter .15s;
+  }
+  .graph-node:hover .node-bg{ stroke: var(--accent); filter: drop-shadow(0 3px 10px rgba(0,0,0,.15)) }
+  .graph-node.user .node-bg{ fill: var(--surface-2) }
+  .graph-node.advisor .node-bg{ fill: var(--accent-bg) }
+  .graph-node.in-path .node-bg{ stroke: var(--accent); stroke-width: 2 }
+  .graph-node.active .node-bg{ stroke: var(--accent); stroke-width: 2.5; fill: var(--accent-bg) }
+
+  .graph-node .node-dot{ fill: var(--text-muted) }
+  .graph-node.user .node-dot{ fill: var(--text-muted) }
+  .graph-node.advisor .node-dot{ fill: var(--accent) }
+  .graph-node.in-path .node-dot,
+  .graph-node.active .node-dot{ fill: var(--accent) }
+
+  .graph-node .node-label{
+    fill: var(--text); font-size: 11.5px;
+    font-family: var(--font-sans);
+  }
+  .graph-node.user .node-label{ fill: var(--text) }
+  .graph-node.advisor .node-label{ fill: var(--text-muted) }
+
+  .graph-node .node-role{
+    fill: var(--text-subtle); font-size: 9.5px;
+    letter-spacing: .14em; text-transform: uppercase;
+    font-weight: 600;
+  }
+
+  /* branch labels (above subtree roots with siblings) */
+  .graph-branch-label{
+    fill: var(--accent); font-size: 10.5px; font-weight: 700;
+    letter-spacing: .12em; text-transform: uppercase;
+  }
+
+  .graph-legend{
+    padding: 10px 20px; border-top: 1px solid var(--border);
+    background: var(--surface);
+    display: flex; align-items: center; gap: 18px;
+    font-size: 12px; color: var(--text-muted);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+  .graph-legend .dot{
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    margin-right: 6px; vertical-align: middle;
+    border: 1px solid var(--border);
+  }
+  .graph-legend .dot.user{ background: var(--surface-2) }
+  .graph-legend .dot.advisor{ background: var(--accent-bg); border-color: var(--border-strong) }
+  .graph-legend .dot.active{ background: var(--accent); border-color: var(--accent) }
+  .graph-legend .graph-hint{ margin-left: auto; color: var(--text-subtle); font-size: 11px }
+
+  @media (max-width: 640px){
+    .graph-legend{ gap: 10px; font-size: 11px }
+    .graph-legend .graph-hint{ width: 100%; margin-left: 0; margin-top: 4px }
+  }
+
   /* ============ Toasts ============ */
   .toast-root{
     position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
@@ -1173,9 +1286,14 @@ WIDGET_HTML = r"""<!doctype html>
     <aside class="tree-pane" id="treePane">
       <div class="tree-head">
         <div class="tree-title">Conversation Tree</div>
-        <button class="icon-btn" id="btn-tree-collapse" title="Collapse tree">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
-        </button>
+        <div style="display:flex; align-items:center; gap:4px">
+          <button class="icon-btn" id="btn-open-graph" title="Open graph view">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="12" r="2"/><path d="M7 6h6a3 3 0 0 1 3 3v0a3 3 0 0 1-3 3H10"/><path d="M7 18h6a3 3 0 0 0 3-3"/></svg>
+          </button>
+          <button class="icon-btn" id="btn-tree-collapse" title="Collapse tree">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+          </button>
+        </div>
       </div>
       <div class="tree-body" id="tree-body">
         <div class="tree-empty">Send a message to begin a thread.</div>
@@ -1230,6 +1348,41 @@ WIDGET_HTML = r"""<!doctype html>
         <button class="btn ghost" id="modal-cancel">Cancel</button>
         <button class="btn primary" id="modal-ok">Confirm</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Graph overlay -->
+  <div class="graph-root" id="graph-root">
+    <div class="graph-head">
+      <div>
+        <div class="graph-title">Conversation Graph</div>
+        <div class="graph-sub" id="graph-sub">Click a node to jump to that branch. Shift-click to branch from it.</div>
+      </div>
+      <div class="graph-actions">
+        <button class="icon-btn" id="graph-zoom-out" title="Zoom out">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M8 11h6"/></svg>
+        </button>
+        <button class="icon-btn" id="graph-zoom-fit" title="Fit view">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5a1 1 0 0 1 1-1h4"/><path d="M20 9V5a1 1 0 0 0-1-1h-4"/><path d="M4 15v4a1 1 0 0 0 1 1h4"/><path d="M20 15v4a1 1 0 0 1-1 1h-4"/></svg>
+        </button>
+        <button class="icon-btn" id="graph-zoom-in" title="Zoom in">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M11 8v6"/><path d="M8 11h6"/></svg>
+        </button>
+        <span class="graph-sep"></span>
+        <button class="icon-btn" id="graph-close" title="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="graph-stage" id="graph-stage">
+      <svg class="graph-svg" id="graph-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div class="graph-empty" id="graph-empty">No messages yet. Start a conversation to see it graphed.</div>
+    </div>
+    <div class="graph-legend">
+      <span><i class="dot user"></i> Your question</span>
+      <span><i class="dot advisor"></i> Advisor reply</span>
+      <span><i class="dot active"></i> Active path</span>
+      <span class="graph-hint">Drag to pan · Scroll to zoom</span>
     </div>
   </div>
 
@@ -1712,6 +1865,370 @@ function clearBranch(){
   elBranchInd.classList.remove('show');
 }
 document.getElementById('branch-clear').addEventListener('click', clearBranch);
+
+/* ===================== Graph View =====================
+ * A 2D pan/zoom graph of the full conversation tree.
+ * Nodes are laid out with a simple tidy-tree algorithm:
+ *   subtreeWidth(n) = max(1, sum of subtreeWidth(child))
+ *   x(n) = left offset + subtreeWidth/2
+ *   y(n) = depth * rowHeight
+ * Subtree "branch titles" are derived from the first user message
+ * in each subtree that has siblings (i.e., real branch points).
+ */
+const graphState = {
+  transform: { x: 40, y: 40, k: 1 },
+  drag: null,
+  svg: null,
+  stage: null,
+  layout: null,
+};
+
+const GRAPH_NODE_W = 210;
+const GRAPH_NODE_H = 58;
+const GRAPH_ROW_H  = 120;
+const GRAPH_COL_W  = 240;
+
+function openGraphModal(){
+  const root = document.getElementById('graph-root');
+  root.classList.add('show');
+  // small delay so layout gets measured correctly
+  requestAnimationFrame(() => renderGraph(true));
+}
+function closeGraphModal(){
+  document.getElementById('graph-root').classList.remove('show');
+}
+document.getElementById('btn-open-graph').addEventListener('click', openGraphModal);
+document.getElementById('graph-close').addEventListener('click', closeGraphModal);
+
+function computeGraphLayout(){
+  const nodes = state.treeNodes;
+  if (!nodes.length) return { nodes: [], edges: [], width: 0, height: 0 };
+
+  // Build parent-index
+  const byId = {};
+  nodes.forEach(n => { byId[n.id] = n });
+  const childrenMap = {};
+  const roots = [];
+  nodes.forEach(n => {
+    if (n.parent_id && byId[n.parent_id]){
+      (childrenMap[n.parent_id] = childrenMap[n.parent_id] || []).push(n);
+    } else {
+      roots.push(n);
+    }
+  });
+  // Sort children by creation time (left-to-right)
+  Object.values(childrenMap).forEach(arr =>
+    arr.sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+  );
+  roots.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+  // Subtree widths
+  const subW = {};
+  function measure(id){
+    const kids = childrenMap[id] || [];
+    if (!kids.length){ subW[id] = 1; return 1 }
+    let w = 0;
+    kids.forEach(k => { w += measure(k.id) });
+    subW[id] = w;
+    return w;
+  }
+  roots.forEach(r => measure(r.id));
+
+  // Compute active path set (for highlighting)
+  const inPath = new Set();
+  let cur = state.activeLeafId;
+  while (cur && byId[cur]){
+    inPath.add(cur);
+    cur = byId[cur].parent_id;
+  }
+
+  // Layout
+  const laidOut = [];
+  let xCursor = 0;
+  function place(id, left, depth){
+    const w = subW[id];
+    const cx = (left + w / 2) * GRAPH_COL_W;
+    const cy = depth * GRAPH_ROW_H;
+    laidOut.push({ id, x: cx, y: cy, depth });
+    const kids = childrenMap[id] || [];
+    let off = left;
+    kids.forEach(k => { place(k.id, off, depth + 1); off += subW[k.id] });
+  }
+  roots.forEach(r => { place(r.id, xCursor, 0); xCursor += subW[r.id] });
+
+  // Edges (parent -> child)
+  const pos = {};
+  laidOut.forEach(p => { pos[p.id] = p });
+  const edges = [];
+  nodes.forEach(n => {
+    if (n.parent_id && pos[n.parent_id]){
+      const p = pos[n.parent_id], c = pos[n.id];
+      edges.push({
+        from: n.parent_id, to: n.id,
+        x1: p.x, y1: p.y + GRAPH_NODE_H / 2,
+        x2: c.x, y2: c.y - GRAPH_NODE_H / 2,
+        inPath: inPath.has(n.parent_id) && inPath.has(n.id),
+      });
+    }
+  });
+
+  // Branch labels: for any node whose parent has >1 children, and which is a user message,
+  // derive a short label from its content.
+  const branchLabels = [];
+  nodes.forEach(n => {
+    if (!n.parent_id) return;
+    const sibs = childrenMap[n.parent_id] || [];
+    if (sibs.length <= 1) return;
+    if (n.role !== 'user') return;
+    const text = plainText(n.content_html).trim();
+    if (!text) return;
+    const label = text.length > 26 ? text.slice(0, 26) + '…' : text;
+    const p = pos[n.id];
+    if (p) branchLabels.push({ x: p.x, y: p.y - GRAPH_NODE_H / 2 - 14, label });
+  });
+
+  // Bounds
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  laidOut.forEach(p => {
+    minX = Math.min(minX, p.x - GRAPH_NODE_W / 2);
+    maxX = Math.max(maxX, p.x + GRAPH_NODE_W / 2);
+    minY = Math.min(minY, p.y - GRAPH_NODE_H / 2);
+    maxY = Math.max(maxY, p.y + GRAPH_NODE_H / 2);
+  });
+
+  return {
+    nodes: laidOut.map(p => ({
+      ...p,
+      msg: byId[p.id],
+      inPath: inPath.has(p.id),
+      active: p.id === state.activeLeafId,
+    })),
+    edges, branchLabels,
+    bounds: { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY },
+  };
+}
+
+function renderGraph(fitView){
+  const svg = document.getElementById('graph-svg');
+  const stage = document.getElementById('graph-stage');
+  const empty = document.getElementById('graph-empty');
+  graphState.svg = svg;
+  graphState.stage = stage;
+
+  const layout = computeGraphLayout();
+  graphState.layout = layout;
+
+  if (!layout.nodes.length){
+    svg.innerHTML = '';
+    empty.classList.remove('hide');
+    return;
+  }
+  empty.classList.add('hide');
+
+  // Build SVG content
+  const xmlns = 'http://www.w3.org/2000/svg';
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+  const rootG = document.createElementNS(xmlns, 'g');
+  rootG.setAttribute('id', 'graph-root-g');
+  svg.appendChild(rootG);
+
+  // Edges (curved)
+  layout.edges.forEach(e => {
+    const path = document.createElementNS(xmlns, 'path');
+    const midY = (e.y1 + e.y2) / 2;
+    const d = 'M ' + e.x1 + ' ' + e.y1 +
+              ' C ' + e.x1 + ' ' + midY + ', ' +
+                      e.x2 + ' ' + midY + ', ' +
+                      e.x2 + ' ' + e.y2;
+    path.setAttribute('d', d);
+    path.setAttribute('class', 'graph-edge' + (e.inPath ? ' in-path' : ''));
+    rootG.appendChild(path);
+  });
+
+  // Branch labels
+  layout.branchLabels.forEach(bl => {
+    const t = document.createElementNS(xmlns, 'text');
+    t.setAttribute('x', bl.x);
+    t.setAttribute('y', bl.y);
+    t.setAttribute('text-anchor', 'middle');
+    t.setAttribute('class', 'graph-branch-label');
+    t.textContent = bl.label.toUpperCase();
+    rootG.appendChild(t);
+  });
+
+  // Nodes
+  layout.nodes.forEach(n => {
+    const g = document.createElementNS(xmlns, 'g');
+    const role = n.msg.role || 'user';
+    const klass = 'graph-node ' + role
+      + (n.inPath ? ' in-path' : '')
+      + (n.active ? ' active' : '');
+    g.setAttribute('class', klass);
+    g.setAttribute('transform', 'translate(' + (n.x - GRAPH_NODE_W / 2) + ',' + (n.y - GRAPH_NODE_H / 2) + ')');
+    g.setAttribute('data-id', n.id);
+
+    const rect = document.createElementNS(xmlns, 'rect');
+    rect.setAttribute('class', 'node-bg');
+    rect.setAttribute('x', 0); rect.setAttribute('y', 0);
+    rect.setAttribute('width', GRAPH_NODE_W);
+    rect.setAttribute('height', GRAPH_NODE_H);
+    rect.setAttribute('rx', 10);
+    g.appendChild(rect);
+
+    const dot = document.createElementNS(xmlns, 'circle');
+    dot.setAttribute('class', 'node-dot');
+    dot.setAttribute('cx', 14); dot.setAttribute('cy', 14); dot.setAttribute('r', 3.5);
+    g.appendChild(dot);
+
+    const roleLabel = document.createElementNS(xmlns, 'text');
+    roleLabel.setAttribute('class', 'node-role');
+    roleLabel.setAttribute('x', 26); roleLabel.setAttribute('y', 17);
+    roleLabel.textContent = role === 'user' ? 'YOU' : 'ADVISOR';
+    g.appendChild(roleLabel);
+
+    const label = document.createElementNS(xmlns, 'text');
+    label.setAttribute('class', 'node-label');
+    label.setAttribute('x', 14); label.setAttribute('y', 40);
+    const raw = plainText(n.msg.content_html).replace(/\s+/g, ' ').trim();
+    label.textContent = raw.length > 32 ? raw.slice(0, 32) + '…' : (raw || '(empty)');
+    g.appendChild(label);
+
+    rootG.appendChild(g);
+  });
+
+  applyGraphTransform();
+
+  if (fitView){
+    fitGraphToView();
+  }
+
+  // Click binding
+  svg.querySelectorAll('.graph-node').forEach(g => {
+    g.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = g.dataset.id;
+      if (e.shiftKey){
+        // Shift-click = branch from this node (child semantics)
+        setBranchFrom(id, 'child');
+        closeGraphModal();
+        toast('Branch armed. Type your follow-up.', 'info');
+      } else {
+        state.activeLeafId = findDescendantLeaf(id);
+        renderThread();
+        renderTree();
+        closeGraphModal();
+      }
+    });
+  });
+}
+
+function applyGraphTransform(){
+  const g = document.getElementById('graph-root-g');
+  if (!g) return;
+  const t = graphState.transform;
+  g.setAttribute('transform', 'translate(' + t.x + ',' + t.y + ') scale(' + t.k + ')');
+}
+
+function fitGraphToView(){
+  const L = graphState.layout;
+  if (!L || !L.nodes.length) return;
+  const stage = graphState.stage;
+  const sw = stage.clientWidth, sh = stage.clientHeight;
+  const pad = 60;
+  const bw = L.bounds.width + pad * 2;
+  const bh = L.bounds.height + pad * 2;
+  const k = Math.min(sw / bw, sh / bh, 1.2);
+  graphState.transform.k = k;
+  graphState.transform.x = -L.bounds.minX * k + (sw - L.bounds.width * k) / 2;
+  graphState.transform.y = -L.bounds.minY * k + (sh - L.bounds.height * k) / 2;
+  applyGraphTransform();
+}
+
+// Pan
+(function bindGraphPanZoom(){
+  const stage = document.getElementById('graph-stage');
+  const svg   = document.getElementById('graph-svg');
+
+  stage.addEventListener('mousedown', (e) => {
+    if (e.target.closest('.graph-node')) return;
+    graphState.drag = { x: e.clientX, y: e.clientY, tx: graphState.transform.x, ty: graphState.transform.y };
+    stage.classList.add('dragging');
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!graphState.drag) return;
+    graphState.transform.x = graphState.drag.tx + (e.clientX - graphState.drag.x);
+    graphState.transform.y = graphState.drag.ty + (e.clientY - graphState.drag.y);
+    applyGraphTransform();
+  });
+  window.addEventListener('mouseup', () => {
+    graphState.drag = null;
+    stage.classList.remove('dragging');
+  });
+
+  // Zoom
+  stage.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const t = graphState.transform;
+    const delta = -e.deltaY * 0.0015;
+    const newK = Math.max(0.2, Math.min(3, t.k * (1 + delta)));
+    const rect = stage.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    // Zoom toward cursor
+    t.x = mx - (mx - t.x) * (newK / t.k);
+    t.y = my - (my - t.y) * (newK / t.k);
+    t.k = newK;
+    applyGraphTransform();
+  }, { passive: false });
+
+  // Touch pan (single finger)
+  let touchStart = null;
+  stage.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return;
+    if (e.target.closest('.graph-node')) return;
+    touchStart = {
+      x: e.touches[0].clientX, y: e.touches[0].clientY,
+      tx: graphState.transform.x, ty: graphState.transform.y,
+    };
+  }, { passive: true });
+  stage.addEventListener('touchmove', (e) => {
+    if (!touchStart || e.touches.length !== 1) return;
+    graphState.transform.x = touchStart.tx + (e.touches[0].clientX - touchStart.x);
+    graphState.transform.y = touchStart.ty + (e.touches[0].clientY - touchStart.y);
+    applyGraphTransform();
+  }, { passive: true });
+  stage.addEventListener('touchend', () => { touchStart = null });
+})();
+
+document.getElementById('graph-zoom-in').addEventListener('click', () => {
+  const t = graphState.transform;
+  const stage = graphState.stage;
+  const cx = stage.clientWidth / 2, cy = stage.clientHeight / 2;
+  const newK = Math.min(3, t.k * 1.25);
+  t.x = cx - (cx - t.x) * (newK / t.k);
+  t.y = cy - (cy - t.y) * (newK / t.k);
+  t.k = newK;
+  applyGraphTransform();
+});
+document.getElementById('graph-zoom-out').addEventListener('click', () => {
+  const t = graphState.transform;
+  const stage = graphState.stage;
+  const cx = stage.clientWidth / 2, cy = stage.clientHeight / 2;
+  const newK = Math.max(0.2, t.k / 1.25);
+  t.x = cx - (cx - t.x) * (newK / t.k);
+  t.y = cy - (cy - t.y) * (newK / t.k);
+  t.k = newK;
+  applyGraphTransform();
+});
+document.getElementById('graph-zoom-fit').addEventListener('click', fitGraphToView);
+
+// Escape to close graph
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('graph-root').classList.contains('show')){
+    closeGraphModal();
+  }
+});
 
 /* ===================== Copy ===================== */
 function copyMessage(id){
