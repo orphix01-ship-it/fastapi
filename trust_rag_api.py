@@ -142,6 +142,18 @@ def init_db():
 
     CREATE INDEX IF NOT EXISTS idx_chats_user ON chats(user_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS zones (
+      id TEXT PRIMARY KEY,
+      chat_id TEXT NOT NULL,
+      title TEXT,
+      narrative TEXT,
+      color TEXT,
+      x REAL, y REAL, w REAL, h REAL,
+      created_at TEXT,
+      updated_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_zones_chat ON zones(chat_id);
     """)
     # Migration: add parent_id for message-level branching
     cur.execute("PRAGMA table_info(messages)")
@@ -149,6 +161,17 @@ def init_db():
     if "parent_id" not in cols:
         cur.execute("ALTER TABLE messages ADD COLUMN parent_id TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id)")
+    # Migration: add graph position + custom title + narrative + manual flag
+    if "graph_x" not in cols:
+        cur.execute("ALTER TABLE messages ADD COLUMN graph_x REAL")
+    if "graph_y" not in cols:
+        cur.execute("ALTER TABLE messages ADD COLUMN graph_y REAL")
+    if "manually_positioned" not in cols:
+        cur.execute("ALTER TABLE messages ADD COLUMN manually_positioned INTEGER DEFAULT 0")
+    if "custom_title" not in cols:
+        cur.execute("ALTER TABLE messages ADD COLUMN custom_title TEXT")
+    if "narrative" not in cols:
+        cur.execute("ALTER TABLE messages ADD COLUMN narrative TEXT")
     conn.commit()
     conn.close()
 
@@ -388,7 +411,8 @@ def get_chat(chat_id: str, user_id: str = Depends(get_current_user)):
         conn.close()
         raise HTTPException(404, "Chat not found")
     msgs = cur.execute(
-        """SELECT id, role, content_html, created_at, parent_id
+        """SELECT id, role, content_html, created_at, parent_id,
+                  graph_x, graph_y, manually_positioned, custom_title, narrative
            FROM messages WHERE chat_id=? ORDER BY created_at ASC LIMIT 1000""",
         (chat_id,),
     ).fetchall()
@@ -416,8 +440,8 @@ def list_messages(chat_id: str, page: int = 1, size: int = 200,
 @app.get("/chats/{chat_id}/tree")
 def get_chat_tree(chat_id: str, user_id: str = Depends(get_current_user)):
     """
-    Return the full branching tree for a chat: every message with its parent_id,
-    so the widget can render the conversation graph.
+    Return the full branching tree for a chat: every message with its parent_id
+    and graph metadata, plus any zones the user has drawn on the graph canvas.
     """
     conn = db()
     cur = conn.cursor()
@@ -426,12 +450,22 @@ def get_chat_tree(chat_id: str, user_id: str = Depends(get_current_user)):
         conn.close()
         raise HTTPException(404, "Chat not found")
     rows = cur.execute(
-        """SELECT id, role, content_html, content_raw, created_at, parent_id
+        """SELECT id, role, content_html, content_raw, created_at, parent_id,
+                  graph_x, graph_y, manually_positioned, custom_title, narrative
            FROM messages WHERE chat_id=? ORDER BY created_at ASC""",
         (chat_id,),
     ).fetchall()
+    zones = cur.execute(
+        """SELECT id, title, narrative, color, x, y, w, h, created_at, updated_at
+           FROM zones WHERE chat_id=? ORDER BY created_at ASC""",
+        (chat_id,),
+    ).fetchall()
     conn.close()
-    return {"chat_id": chat_id, "nodes": [dict(r) for r in rows]}
+    return {
+        "chat_id": chat_id,
+        "nodes": [dict(r) for r in rows],
+        "zones": [dict(z) for z in zones],
+    }
 
 @app.post("/chats/{chat_id}/title")
 def rename_chat(chat_id: str, title: str = Form(...), user_id: str = Depends(get_current_user)):
@@ -465,10 +499,215 @@ def delete_chat(chat_id: str, user_id: str = Depends(get_current_user)):
     conn = db()
     cur = conn.cursor()
     cur.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
+    cur.execute("DELETE FROM zones WHERE chat_id=?", (chat_id,))
     cur.execute("DELETE FROM chats WHERE id=? AND user_id=?", (chat_id, user_id))
     if cur.rowcount == 0:
         conn.close()
         raise HTTPException(404, "Chat not found or not yours")
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+# ========== GRAPH / CANVAS API ==========
+
+def _verify_chat_ownership(cur, chat_id: str, user_id: str):
+    row = cur.execute("SELECT 1 FROM chats WHERE id=? AND user_id=?",
+                      (chat_id, user_id)).fetchone()
+    if not row:
+        raise HTTPException(404, "Chat not found")
+
+def _verify_msg_ownership(cur, msg_id: str, user_id: str):
+    row = cur.execute(
+        """SELECT m.chat_id FROM messages m
+           JOIN chats c ON c.id = m.chat_id
+           WHERE m.id=? AND c.user_id=?""",
+        (msg_id, user_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Message not found")
+    return row["chat_id"]
+
+@app.post("/messages/{msg_id}/position")
+def update_message_position(msg_id: str,
+                            x: float = Form(...),
+                            y: float = Form(...),
+                            manual: int = Form(1),
+                            user_id: str = Depends(get_current_user)):
+    """Persist a dragged node's position. manual=1 pins it, manual=0 releases."""
+    conn = db()
+    cur = conn.cursor()
+    _verify_msg_ownership(cur, msg_id, user_id)
+    cur.execute(
+        "UPDATE messages SET graph_x=?, graph_y=?, manually_positioned=? WHERE id=?",
+        (x, y, 1 if manual else 0, msg_id),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+@app.post("/messages/{msg_id}/meta")
+def update_message_meta(msg_id: str,
+                        custom_title: Optional[str] = Form(None),
+                        narrative: Optional[str] = Form(None),
+                        user_id: str = Depends(get_current_user)):
+    """Update a message's custom title or narrative description."""
+    conn = db()
+    cur = conn.cursor()
+    _verify_msg_ownership(cur, msg_id, user_id)
+    sets, vals = [], []
+    if custom_title is not None:
+        sets.append("custom_title=?"); vals.append(custom_title[:500])
+    if narrative is not None:
+        sets.append("narrative=?"); vals.append(narrative[:20000])
+    if not sets:
+        conn.close()
+        return {"ok": True}
+    vals.append(msg_id)
+    cur.execute(f"UPDATE messages SET {', '.join(sets)} WHERE id=?", vals)
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+@app.post("/chats/{chat_id}/topic")
+def create_topic_node(chat_id: str,
+                      title: str = Form(...),
+                      x: float = Form(...),
+                      y: float = Form(...),
+                      parent_id: Optional[str] = Form(None),
+                      narrative: Optional[str] = Form(None),
+                      user_id: str = Depends(get_current_user)):
+    """
+    Create a placeholder 'topic' node on the canvas. Topic nodes live in the
+    messages table with role='topic'; they serve as parent containers for
+    real user/advisor messages that attach below them.
+    """
+    conn = db()
+    cur = conn.cursor()
+    _verify_chat_ownership(cur, chat_id, user_id)
+    if parent_id:
+        prow = cur.execute("SELECT 1 FROM messages WHERE id=? AND chat_id=?",
+                           (parent_id, chat_id)).fetchone()
+        if not prow:
+            conn.close()
+            raise HTTPException(400, "Parent message not in this chat")
+    mid = str(uuid.uuid4())
+    now = iso_now()
+    safe_title = (title or "Untitled topic").strip()[:500]
+    placeholder_html = f'<p><strong>{safe_title}</strong></p>'
+    cur.execute(
+        """INSERT INTO messages
+           (id, chat_id, user_id, role, content_html, content_raw, meta_json,
+            created_at, parent_id, graph_x, graph_y, manually_positioned,
+            custom_title, narrative)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (mid, chat_id, user_id, "topic", placeholder_html, safe_title,
+         json.dumps({"topic": True}), now, parent_id, x, y, 1,
+         safe_title, (narrative or None)),
+    )
+    cur.execute("UPDATE chats SET updated_at=? WHERE id=?", (now, chat_id))
+    conn.commit()
+    conn.close()
+    return {"id": mid, "created_at": now}
+
+@app.delete("/messages/{msg_id}")
+def delete_message(msg_id: str, user_id: str = Depends(get_current_user)):
+    """Delete a single node (and re-parent its children to its parent)."""
+    conn = db()
+    cur = conn.cursor()
+    chat_id = _verify_msg_ownership(cur, msg_id, user_id)
+    row = cur.execute("SELECT parent_id FROM messages WHERE id=?", (msg_id,)).fetchone()
+    grand = row["parent_id"] if row else None
+    cur.execute("UPDATE messages SET parent_id=? WHERE parent_id=?", (grand, msg_id))
+    cur.execute("DELETE FROM messages WHERE id=?", (msg_id,))
+    cur.execute("UPDATE chats SET updated_at=? WHERE id=?", (iso_now(), chat_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+# -- Zones --
+
+@app.post("/chats/{chat_id}/zones")
+def create_zone(chat_id: str,
+                title: str = Form("Untitled zone"),
+                color: str = Form("#8b6f3e"),
+                x: float = Form(...), y: float = Form(...),
+                w: float = Form(...), h: float = Form(...),
+                narrative: Optional[str] = Form(None),
+                user_id: str = Depends(get_current_user)):
+    conn = db()
+    cur = conn.cursor()
+    _verify_chat_ownership(cur, chat_id, user_id)
+    zid = str(uuid.uuid4())
+    now = iso_now()
+    cur.execute(
+        """INSERT INTO zones (id, chat_id, title, narrative, color, x, y, w, h,
+                              created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (zid, chat_id, title[:500], (narrative or None), color, x, y, w, h, now, now),
+    )
+    conn.commit()
+    conn.close()
+    return {"id": zid, "created_at": now}
+
+@app.post("/zones/{zone_id}")
+def update_zone(zone_id: str,
+                title: Optional[str] = Form(None),
+                color: Optional[str] = Form(None),
+                x: Optional[float] = Form(None),
+                y: Optional[float] = Form(None),
+                w: Optional[float] = Form(None),
+                h: Optional[float] = Form(None),
+                narrative: Optional[str] = Form(None),
+                user_id: str = Depends(get_current_user)):
+    conn = db()
+    cur = conn.cursor()
+    row = cur.execute(
+        """SELECT z.id FROM zones z JOIN chats c ON c.id = z.chat_id
+           WHERE z.id=? AND c.user_id=?""", (zone_id, user_id)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Zone not found")
+    sets, vals = [], []
+    for k, v in [("title", title), ("color", color), ("x", x), ("y", y),
+                 ("w", w), ("h", h), ("narrative", narrative)]:
+        if v is not None:
+            sets.append(f"{k}=?"); vals.append(v)
+    if not sets:
+        conn.close()
+        return {"ok": True}
+    sets.append("updated_at=?"); vals.append(iso_now())
+    vals.append(zone_id)
+    cur.execute(f"UPDATE zones SET {', '.join(sets)} WHERE id=?", vals)
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+@app.delete("/zones/{zone_id}")
+def delete_zone(zone_id: str, user_id: str = Depends(get_current_user)):
+    conn = db()
+    cur = conn.cursor()
+    row = cur.execute(
+        """SELECT z.id FROM zones z JOIN chats c ON c.id = z.chat_id
+           WHERE z.id=? AND c.user_id=?""", (zone_id, user_id)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Zone not found")
+    cur.execute("DELETE FROM zones WHERE id=?", (zone_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+@app.post("/chats/{chat_id}/relayout")
+def clear_manual_positions(chat_id: str, user_id: str = Depends(get_current_user)):
+    """Clear all manual positions in a chat so auto-layout takes over again."""
+    conn = db()
+    cur = conn.cursor()
+    _verify_chat_ownership(cur, chat_id, user_id)
+    cur.execute(
+        """UPDATE messages SET manually_positioned=0, graph_x=NULL, graph_y=NULL
+           WHERE chat_id=?""",
+        (chat_id,),
+    )
     conn.commit()
     conn.close()
     return {"ok": True}
@@ -1162,11 +1401,141 @@ WIDGET_HTML = r"""<!doctype html>
   .graph-legend .dot.user{ background: var(--surface-2) }
   .graph-legend .dot.advisor{ background: var(--accent-bg); border-color: var(--border-strong) }
   .graph-legend .dot.active{ background: var(--accent); border-color: var(--accent) }
+  .graph-legend .dot.topic{ background: transparent; border: 1.5px dashed var(--accent) }
   .graph-legend .graph-hint{ margin-left: auto; color: var(--text-subtle); font-size: 11px }
+
+  /* ---- Toolbar ---- */
+  .graph-toolbar{
+    display: inline-flex; align-items: center; gap: 2px;
+    padding: 3px; border-radius: var(--radius);
+    background: var(--surface-2); border: 1px solid var(--border);
+  }
+  .tool-btn{
+    width: 34px; height: 30px; border-radius: 7px;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--text-muted); transition: background var(--t-fast), color var(--t-fast);
+  }
+  .tool-btn svg{ width: 15px; height: 15px }
+  .tool-btn:hover{ background: var(--surface-3); color: var(--text) }
+  .tool-btn.active{ background: var(--accent); color: #fff }
+  .tool-btn.active:hover{ background: var(--accent) }
+
+  /* ---- Stage cursors per mode ---- */
+  .graph-stage.mode-select{ cursor: grab }
+  .graph-stage.mode-select.dragging{ cursor: grabbing }
+  .graph-stage.mode-zone{ cursor: crosshair }
+  .graph-stage.mode-topic{ cursor: copy }
+
+  /* ---- Zones ---- */
+  .graph-zone{ cursor: pointer; transition: opacity var(--t-fast) }
+  .graph-zone:hover rect{ fill-opacity: 0.18 }
+  .graph-zone.selected rect{ filter: drop-shadow(0 4px 14px rgba(0,0,0,.15)) }
+  .zone-title{
+    font-size: 10.5px; font-weight: 700;
+    letter-spacing: .14em; font-family: var(--font-sans);
+    pointer-events: none;
+  }
+  .zone-resize{ cursor: nwse-resize; fill-opacity: 0.85; rx: 2; stroke: #fff; stroke-width: 1 }
+  .ghost-zone{
+    fill: var(--accent); fill-opacity: 0.10;
+    stroke: var(--accent); stroke-width: 1.5;
+    stroke-dasharray: 6 4;
+    pointer-events: none;
+  }
+
+  /* ---- Topic nodes ---- */
+  .graph-node.topic .node-bg{
+    fill: var(--surface);
+    stroke: var(--accent);
+    stroke-width: 1.5;
+    stroke-dasharray: 5 3;
+  }
+  .graph-node.topic .node-dot{ fill: var(--accent) }
+  .graph-node.topic .node-label{ font-weight: 600 }
+
+  /* ---- Selected / pinned / dragging nodes ---- */
+  .graph-node.selected .node-bg{
+    stroke: var(--accent);
+    stroke-width: 2.5;
+    filter: drop-shadow(0 6px 18px rgba(139,111,62,.35));
+  }
+  .graph-node.dragging{ opacity: 0.85 }
+  .graph-node.dragging .node-bg{ filter: drop-shadow(0 10px 22px rgba(0,0,0,.25)) }
+  .node-pin{ fill: var(--accent); opacity: 0.85 }
+  .node-narrative-badge{ fill: var(--accent); opacity: 0.85 }
+
+  /* ---- Narrative side panel ---- */
+  .narrative-panel{
+    position: absolute; top: 0; right: 0; bottom: 0;
+    width: 420px; max-width: 90vw;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    box-shadow: var(--shadow-lg);
+    display: flex; flex-direction: column;
+    transform: translateX(100%);
+    transition: transform var(--t-base);
+    z-index: 5;
+  }
+  .narrative-panel.show{ transform: translateX(0) }
+  .narr-head{
+    height: 52px; padding: 0 14px 0 18px;
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .narr-kind{
+    font-size: 10.5px; font-weight: 700;
+    letter-spacing: .16em; color: var(--accent);
+  }
+  .narr-body{
+    flex: 1; min-height: 0; overflow-y: auto;
+    padding: 18px 20px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .narr-label{
+    font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--text-subtle); font-weight: 600;
+    margin-top: 10px;
+  }
+  .narr-label:first-child{ margin-top: 0 }
+  .narr-input, .narr-textarea{
+    width: 100%;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    color: var(--text); font-size: 13.5px;
+    font-family: var(--font-sans);
+    transition: border-color var(--t-fast), box-shadow var(--t-fast);
+  }
+  .narr-input:focus, .narr-textarea:focus{
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--ring);
+  }
+  .narr-textarea{ resize: vertical; min-height: 160px; line-height: 1.55 }
+  .color-row{ display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px }
+  .color-sw{
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 2px solid transparent;
+    cursor: pointer;
+    transition: transform var(--t-fast), border-color var(--t-fast);
+  }
+  .color-sw:hover{ transform: scale(1.1) }
+  .color-sw.active{ border-color: var(--text); box-shadow: 0 0 0 1px var(--surface) inset }
+  .narr-foot{
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px;
+    flex-shrink: 0;
+  }
 
   @media (max-width: 640px){
     .graph-legend{ gap: 10px; font-size: 11px }
     .graph-legend .graph-hint{ width: 100%; margin-left: 0; margin-top: 4px }
+    .narrative-panel{ width: 100% }
+    .graph-toolbar{ padding: 2px }
+    .tool-btn{ width: 30px; height: 28px }
   }
 
   /* ============ Toasts ============ */
@@ -1356,9 +1725,23 @@ WIDGET_HTML = r"""<!doctype html>
     <div class="graph-head">
       <div>
         <div class="graph-title">Conversation Graph</div>
-        <div class="graph-sub" id="graph-sub">Click a node to jump to that branch. Shift-click to branch from it.</div>
+        <div class="graph-sub" id="graph-sub">Click to select · Drag to reposition · Double-click empty canvas for new topic · Shift-click a node to branch</div>
       </div>
       <div class="graph-actions">
+        <!-- Tool selector -->
+        <div class="graph-toolbar">
+          <button class="tool-btn active" data-graph-tool="select" title="Select & move">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l7.5 18 2-7.5 7.5-2z"/></svg>
+          </button>
+          <button class="tool-btn" data-graph-tool="zone" title="Draw zone (click-drag on empty canvas)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3" stroke-dasharray="4 3"/></svg>
+          </button>
+        </div>
+        <span class="graph-sep"></span>
+        <button class="icon-btn" id="graph-relayout" title="Reset to auto-layout">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15.5-6.2"/><path d="M21 4v6h-6"/><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 20v-6h6"/></svg>
+        </button>
+        <span class="graph-sep"></span>
         <button class="icon-btn" id="graph-zoom-out" title="Zoom out">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M8 11h6"/></svg>
         </button>
@@ -1374,15 +1757,44 @@ WIDGET_HTML = r"""<!doctype html>
         </button>
       </div>
     </div>
-    <div class="graph-stage" id="graph-stage">
+    <div class="graph-stage mode-select" id="graph-stage">
       <svg class="graph-svg" id="graph-svg" xmlns="http://www.w3.org/2000/svg"></svg>
-      <div class="graph-empty" id="graph-empty">No messages yet. Start a conversation to see it graphed.</div>
+      <div class="graph-empty" id="graph-empty">No messages yet. Start a conversation, or double-click the canvas to add a topic.</div>
+
+      <!-- Narrative side panel -->
+      <aside class="narrative-panel" id="narrative-panel">
+        <div class="narr-head">
+          <span class="narr-kind" id="narr-kind">NODE</span>
+          <button class="icon-btn" id="narr-close" title="Close panel">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="narr-body">
+          <label class="narr-label">Title</label>
+          <input class="narr-input" id="narr-title" placeholder="Name this node or zone"/>
+
+          <div id="narr-color-row-wrap" style="display:none">
+            <label class="narr-label">Color</label>
+            <div class="color-row" id="narr-color-row"></div>
+          </div>
+
+          <label class="narr-label">Narrative</label>
+          <textarea class="narr-textarea" id="narr-text" rows="10" placeholder="Comprehensive notes, context, reasoning, decisions, references…"></textarea>
+        </div>
+        <div class="narr-foot">
+          <button class="btn ghost" id="narr-delete">Delete</button>
+          <div style="flex:1"></div>
+          <button class="btn ghost" id="narr-open-chat">Open in chat</button>
+          <button class="btn primary" id="narr-save">Save</button>
+        </div>
+      </aside>
     </div>
     <div class="graph-legend">
       <span><i class="dot user"></i> Your question</span>
       <span><i class="dot advisor"></i> Advisor reply</span>
+      <span><i class="dot topic"></i> Topic</span>
       <span><i class="dot active"></i> Active path</span>
-      <span class="graph-hint">Drag to pan · Scroll to zoom</span>
+      <span class="graph-hint">Drag background = pan · Drag node = reposition · Double-click = new topic · Scroll = zoom</span>
     </div>
   </div>
 
@@ -1867,44 +2279,104 @@ function clearBranch(){
 document.getElementById('branch-clear').addEventListener('click', clearBranch);
 
 /* ===================== Graph View =====================
- * A 2D pan/zoom graph of the full conversation tree.
- * Nodes are laid out with a simple tidy-tree algorithm:
- *   subtreeWidth(n) = max(1, sum of subtreeWidth(child))
- *   x(n) = left offset + subtreeWidth/2
- *   y(n) = depth * rowHeight
- * Subtree "branch titles" are derived from the first user message
- * in each subtree that has siblings (i.e., real branch points).
+ * An interactive 2D canvas for the conversation tree.
+ *
+ * Features:
+ *   - Pan (drag background) / Zoom (wheel, pinch, buttons)
+ *   - Drag nodes to manually position them (persisted to backend)
+ *   - Double-click empty canvas to create a new 'topic' node
+ *   - Zone tool: click-drag to draw a colored region around nodes
+ *   - Click node/zone to open narrative side panel with editable details
+ *   - Re-layout button to clear manual positions and snap back to auto-layout
+ *
+ * Layout rules:
+ *   - Nodes with manually_positioned=1 use graph_x/graph_y
+ *   - Other nodes get tidy-tree auto-layout, positioned relative to their
+ *     ancestors' manual positions where those exist
  */
 const graphState = {
   transform: { x: 40, y: 40, k: 1 },
-  drag: null,
+  drag: null,             // { type: 'pan'|'node'|'zone-draw'|'zone-move'|'zone-resize', ... }
   svg: null,
   stage: null,
   layout: null,
+  mode: 'select',         // 'select' | 'zone' | 'topic'
+  selected: null,         // { kind: 'node'|'zone', id }
+  zones: [],              // loaded from /tree
+  _drewSinceDown: false,
+  _pendingClick: null,
 };
 
-const GRAPH_NODE_W = 210;
-const GRAPH_NODE_H = 58;
-const GRAPH_ROW_H  = 120;
-const GRAPH_COL_W  = 240;
+const GRAPH_NODE_W = 220;
+const GRAPH_NODE_H = 66;
+const GRAPH_ROW_H  = 130;
+const GRAPH_COL_W  = 250;
+const DRAG_THRESHOLD = 4;   // px before a click becomes a drag
+
+const ZONE_PALETTE = [
+  '#8b6f3e', '#3e6b8b', '#6b3e8b', '#8b3e52',
+  '#3e8b6f', '#8b853e', '#555b6e', '#a0522d',
+];
+
+function setGraphMode(mode){
+  graphState.mode = mode;
+  document.querySelectorAll('[data-graph-tool]').forEach(el => {
+    el.classList.toggle('active', el.dataset.graphTool === mode);
+  });
+  const stage = graphState.stage;
+  if (stage){
+    stage.classList.toggle('mode-zone', mode === 'zone');
+    stage.classList.toggle('mode-topic', mode === 'topic');
+    stage.classList.toggle('mode-select', mode === 'select');
+  }
+}
 
 function openGraphModal(){
   const root = document.getElementById('graph-root');
   root.classList.add('show');
-  // small delay so layout gets measured correctly
   requestAnimationFrame(() => renderGraph(true));
 }
 function closeGraphModal(){
   document.getElementById('graph-root').classList.remove('show');
+  closeNarrativePanel();
 }
 document.getElementById('btn-open-graph').addEventListener('click', openGraphModal);
 document.getElementById('graph-close').addEventListener('click', closeGraphModal);
 
+// Tool buttons
+document.querySelectorAll('[data-graph-tool]').forEach(btn => {
+  btn.addEventListener('click', () => setGraphMode(btn.dataset.graphTool));
+});
+
+document.getElementById('graph-relayout').addEventListener('click', async () => {
+  const ok = await modal({
+    title: 'Reset to auto-layout?',
+    desc: 'This clears every manual position in this chat and re-runs the tidy-tree algorithm. Zones are kept.',
+    okLabel: 'Reset layout',
+  });
+  if (!ok) return;
+  if (!state.currentChatId) return;
+  try {
+    await api('POST', '/chats/' + state.currentChatId + '/relayout', { form: new FormData() });
+    // clear local flags
+    state.treeNodes.forEach(n => {
+      n.manually_positioned = 0;
+      n.graph_x = null; n.graph_y = null;
+    });
+    renderGraph(true);
+    toast('Layout reset', 'success');
+  } catch(e){
+    toast('Relayout failed: ' + e.message, 'error');
+  }
+});
+
+/* ---------- Layout ---------- */
 function computeGraphLayout(){
   const nodes = state.treeNodes;
-  if (!nodes.length) return { nodes: [], edges: [], width: 0, height: 0 };
+  if (!nodes.length && !graphState.zones.length){
+    return { nodes: [], edges: [], branchLabels: [], bounds: null };
+  }
 
-  // Build parent-index
   const byId = {};
   nodes.forEach(n => { byId[n.id] = n });
   const childrenMap = {};
@@ -1916,13 +2388,11 @@ function computeGraphLayout(){
       roots.push(n);
     }
   });
-  // Sort children by creation time (left-to-right)
   Object.values(childrenMap).forEach(arr =>
     arr.sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
   );
   roots.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
-  // Subtree widths
   const subW = {};
   function measure(id){
     const kids = childrenMap[id] || [];
@@ -1934,7 +2404,7 @@ function computeGraphLayout(){
   }
   roots.forEach(r => measure(r.id));
 
-  // Compute active path set (for highlighting)
+  // Build active-path set for highlighting
   const inPath = new Set();
   let cur = state.activeLeafId;
   while (cur && byId[cur]){
@@ -1942,26 +2412,34 @@ function computeGraphLayout(){
     cur = byId[cur].parent_id;
   }
 
-  // Layout
-  const laidOut = [];
+  // Auto-layout positions (fallback for nodes without manual position)
+  const autoPos = {};
   let xCursor = 0;
   function place(id, left, depth){
     const w = subW[id];
     const cx = (left + w / 2) * GRAPH_COL_W;
     const cy = depth * GRAPH_ROW_H;
-    laidOut.push({ id, x: cx, y: cy, depth });
+    autoPos[id] = { x: cx, y: cy, depth };
     const kids = childrenMap[id] || [];
     let off = left;
     kids.forEach(k => { place(k.id, off, depth + 1); off += subW[k.id] });
   }
   roots.forEach(r => { place(r.id, xCursor, 0); xCursor += subW[r.id] });
 
-  // Edges (parent -> child)
+  // Final positions: manual > auto
   const pos = {};
-  laidOut.forEach(p => { pos[p.id] = p });
+  nodes.forEach(n => {
+    if (n.manually_positioned && n.graph_x != null && n.graph_y != null){
+      pos[n.id] = { x: n.graph_x, y: n.graph_y };
+    } else if (autoPos[n.id]){
+      pos[n.id] = { x: autoPos[n.id].x, y: autoPos[n.id].y };
+    }
+  });
+
+  // Edges
   const edges = [];
   nodes.forEach(n => {
-    if (n.parent_id && pos[n.parent_id]){
+    if (n.parent_id && pos[n.parent_id] && pos[n.id]){
       const p = pos[n.parent_id], c = pos[n.id];
       edges.push({
         from: n.parent_id, to: n.id,
@@ -1972,60 +2450,74 @@ function computeGraphLayout(){
     }
   });
 
-  // Branch labels: for any node whose parent has >1 children, and which is a user message,
-  // derive a short label from its content.
+  // Branch labels (first user/topic under a fork point)
   const branchLabels = [];
   nodes.forEach(n => {
     if (!n.parent_id) return;
     const sibs = childrenMap[n.parent_id] || [];
     if (sibs.length <= 1) return;
-    if (n.role !== 'user') return;
-    const text = plainText(n.content_html).trim();
-    if (!text) return;
-    const label = text.length > 26 ? text.slice(0, 26) + '…' : text;
+    if (n.role !== 'user' && n.role !== 'topic') return;
+    const label = n.custom_title
+      ? n.custom_title
+      : plainText(n.content_html).trim();
+    if (!label) return;
+    const short = label.length > 26 ? label.slice(0, 26) + '…' : label;
     const p = pos[n.id];
-    if (p) branchLabels.push({ x: p.x, y: p.y - GRAPH_NODE_H / 2 - 14, label });
+    if (p) branchLabels.push({ x: p.x, y: p.y - GRAPH_NODE_H / 2 - 14, label: short });
   });
 
   // Bounds
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  laidOut.forEach(p => {
-    minX = Math.min(minX, p.x - GRAPH_NODE_W / 2);
-    maxX = Math.max(maxX, p.x + GRAPH_NODE_W / 2);
-    minY = Math.min(minY, p.y - GRAPH_NODE_H / 2);
-    maxY = Math.max(maxY, p.y + GRAPH_NODE_H / 2);
+  const laidOut = nodes
+    .filter(n => pos[n.id])
+    .map(n => {
+      const p = pos[n.id];
+      minX = Math.min(minX, p.x - GRAPH_NODE_W / 2);
+      maxX = Math.max(maxX, p.x + GRAPH_NODE_W / 2);
+      minY = Math.min(minY, p.y - GRAPH_NODE_H / 2);
+      maxY = Math.max(maxY, p.y + GRAPH_NODE_H / 2);
+      return {
+        id: n.id, x: p.x, y: p.y,
+        msg: n,
+        inPath: inPath.has(n.id),
+        active: n.id === state.activeLeafId,
+        selected: graphState.selected &&
+                  graphState.selected.kind === 'node' &&
+                  graphState.selected.id === n.id,
+      };
+    });
+
+  graphState.zones.forEach(z => {
+    minX = Math.min(minX, z.x);
+    maxX = Math.max(maxX, z.x + z.w);
+    minY = Math.min(minY, z.y);
+    maxY = Math.max(maxY, z.y + z.h);
   });
 
+  if (!isFinite(minX)){ minX = 0; maxX = 400; minY = 0; maxY = 400 }
+
   return {
-    nodes: laidOut.map(p => ({
-      ...p,
-      msg: byId[p.id],
-      inPath: inPath.has(p.id),
-      active: p.id === state.activeLeafId,
-    })),
-    edges, branchLabels,
-    bounds: { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY },
+    nodes: laidOut, edges, branchLabels,
+    bounds: { minX, maxX, minY, maxY,
+              width: maxX - minX, height: maxY - minY },
   };
 }
 
+/* ---------- Render ---------- */
 function renderGraph(fitView){
   const svg = document.getElementById('graph-svg');
   const stage = document.getElementById('graph-stage');
   const empty = document.getElementById('graph-empty');
   graphState.svg = svg;
   graphState.stage = stage;
+  setGraphMode(graphState.mode);
 
   const layout = computeGraphLayout();
   graphState.layout = layout;
 
-  if (!layout.nodes.length){
-    svg.innerHTML = '';
-    empty.classList.remove('hide');
-    return;
-  }
-  empty.classList.add('hide');
+  const nothing = !layout.nodes.length && !graphState.zones.length;
+  empty.classList.toggle('hide', !nothing);
 
-  // Build SVG content
   const xmlns = 'http://www.w3.org/2000/svg';
   while (svg.firstChild) svg.removeChild(svg.firstChild);
 
@@ -2033,7 +2525,50 @@ function renderGraph(fitView){
   rootG.setAttribute('id', 'graph-root-g');
   svg.appendChild(rootG);
 
-  // Edges (curved)
+  // Zones (drawn first, under everything)
+  graphState.zones.forEach(z => {
+    const g = document.createElementNS(xmlns, 'g');
+    const isSelected = graphState.selected &&
+                       graphState.selected.kind === 'zone' &&
+                       graphState.selected.id === z.id;
+    g.setAttribute('class', 'graph-zone' + (isSelected ? ' selected' : ''));
+    g.setAttribute('data-zone-id', z.id);
+
+    const rect = document.createElementNS(xmlns, 'rect');
+    rect.setAttribute('x', z.x); rect.setAttribute('y', z.y);
+    rect.setAttribute('width', z.w); rect.setAttribute('height', z.h);
+    rect.setAttribute('rx', 14);
+    rect.setAttribute('fill', z.color || '#8b6f3e');
+    rect.setAttribute('fill-opacity', '0.10');
+    rect.setAttribute('stroke', z.color || '#8b6f3e');
+    rect.setAttribute('stroke-width', isSelected ? 2 : 1.5);
+    rect.setAttribute('stroke-dasharray', isSelected ? '' : '6 4');
+    g.appendChild(rect);
+
+    const t = document.createElementNS(xmlns, 'text');
+    t.setAttribute('x', z.x + 14);
+    t.setAttribute('y', z.y + 22);
+    t.setAttribute('class', 'zone-title');
+    t.setAttribute('fill', z.color || '#8b6f3e');
+    t.textContent = (z.title || 'Untitled zone').toUpperCase();
+    g.appendChild(t);
+
+    if (isSelected){
+      // Resize handle (bottom-right)
+      const handle = document.createElementNS(xmlns, 'rect');
+      handle.setAttribute('x', z.x + z.w - 10);
+      handle.setAttribute('y', z.y + z.h - 10);
+      handle.setAttribute('width', 12);
+      handle.setAttribute('height', 12);
+      handle.setAttribute('class', 'zone-resize');
+      handle.setAttribute('fill', z.color || '#8b6f3e');
+      g.appendChild(handle);
+    }
+
+    rootG.appendChild(g);
+  });
+
+  // Edges
   layout.edges.forEach(e => {
     const path = document.createElementNS(xmlns, 'path');
     const midY = (e.y1 + e.y2) / 2;
@@ -2063,7 +2598,9 @@ function renderGraph(fitView){
     const role = n.msg.role || 'user';
     const klass = 'graph-node ' + role
       + (n.inPath ? ' in-path' : '')
-      + (n.active ? ' active' : '');
+      + (n.active ? ' active' : '')
+      + (n.selected ? ' selected' : '')
+      + (n.msg.manually_positioned ? ' pinned' : '');
     g.setAttribute('class', klass);
     g.setAttribute('transform', 'translate(' + (n.x - GRAPH_NODE_W / 2) + ',' + (n.y - GRAPH_NODE_H / 2) + ')');
     g.setAttribute('data-id', n.id);
@@ -2084,43 +2621,47 @@ function renderGraph(fitView){
     const roleLabel = document.createElementNS(xmlns, 'text');
     roleLabel.setAttribute('class', 'node-role');
     roleLabel.setAttribute('x', 26); roleLabel.setAttribute('y', 17);
-    roleLabel.textContent = role === 'user' ? 'YOU' : 'ADVISOR';
+    const roleText = role === 'topic' ? 'TOPIC'
+                    : role === 'advisor' ? 'ADVISOR' : 'YOU';
+    roleLabel.textContent = roleText;
     g.appendChild(roleLabel);
+
+    // Pinned indicator
+    if (n.msg.manually_positioned){
+      const pin = document.createElementNS(xmlns, 'circle');
+      pin.setAttribute('cx', GRAPH_NODE_W - 14);
+      pin.setAttribute('cy', 14);
+      pin.setAttribute('r', 3);
+      pin.setAttribute('class', 'node-pin');
+      g.appendChild(pin);
+    }
 
     const label = document.createElementNS(xmlns, 'text');
     label.setAttribute('class', 'node-label');
     label.setAttribute('x', 14); label.setAttribute('y', 40);
-    const raw = plainText(n.msg.content_html).replace(/\s+/g, ' ').trim();
-    label.textContent = raw.length > 32 ? raw.slice(0, 32) + '…' : (raw || '(empty)');
+    const displayText = n.msg.custom_title
+      ? n.msg.custom_title
+      : plainText(n.msg.content_html).replace(/\s+/g, ' ').trim();
+    label.textContent = displayText.length > 32
+      ? displayText.slice(0, 32) + '…'
+      : (displayText || '(empty)');
     g.appendChild(label);
+
+    // Narrative badge
+    if (n.msg.narrative && n.msg.narrative.trim()){
+      const bg = document.createElementNS(xmlns, 'circle');
+      bg.setAttribute('cx', GRAPH_NODE_W - 14);
+      bg.setAttribute('cy', GRAPH_NODE_H - 14);
+      bg.setAttribute('r', 6);
+      bg.setAttribute('class', 'node-narrative-badge');
+      g.appendChild(bg);
+    }
 
     rootG.appendChild(g);
   });
 
   applyGraphTransform();
-
-  if (fitView){
-    fitGraphToView();
-  }
-
-  // Click binding
-  svg.querySelectorAll('.graph-node').forEach(g => {
-    g.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const id = g.dataset.id;
-      if (e.shiftKey){
-        // Shift-click = branch from this node (child semantics)
-        setBranchFrom(id, 'child');
-        closeGraphModal();
-        toast('Branch armed. Type your follow-up.', 'info');
-      } else {
-        state.activeLeafId = findDescendantLeaf(id);
-        renderThread();
-        renderTree();
-        closeGraphModal();
-      }
-    });
-  });
+  if (fitView) fitGraphToView();
 }
 
 function applyGraphTransform(){
@@ -2132,12 +2673,13 @@ function applyGraphTransform(){
 
 function fitGraphToView(){
   const L = graphState.layout;
-  if (!L || !L.nodes.length) return;
+  if (!L || !L.bounds) return;
   const stage = graphState.stage;
   const sw = stage.clientWidth, sh = stage.clientHeight;
   const pad = 60;
   const bw = L.bounds.width + pad * 2;
   const bh = L.bounds.height + pad * 2;
+  if (bw <= 0 || bh <= 0){ graphState.transform = { x: 40, y: 40, k: 1 }; applyGraphTransform(); return }
   const k = Math.min(sw / bw, sh / bh, 1.2);
   graphState.transform.k = k;
   graphState.transform.x = -L.bounds.minX * k + (sw - L.bounds.width * k) / 2;
@@ -2145,25 +2687,240 @@ function fitGraphToView(){
   applyGraphTransform();
 }
 
-// Pan
-(function bindGraphPanZoom(){
+/* ---------- Coordinate helpers ---------- */
+function screenToWorld(clientX, clientY){
+  const stage = graphState.stage;
+  const r = stage.getBoundingClientRect();
+  const t = graphState.transform;
+  return {
+    x: (clientX - r.left - t.x) / t.k,
+    y: (clientY - r.top  - t.y) / t.k,
+  };
+}
+
+/* ---------- Interaction ---------- */
+(function bindGraphInteraction(){
   const stage = document.getElementById('graph-stage');
   const svg   = document.getElementById('graph-svg');
 
+  // Mouse down
   stage.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.graph-node')) return;
-    graphState.drag = { x: e.clientX, y: e.clientY, tx: graphState.transform.x, ty: graphState.transform.y };
+    if (e.button !== 0) return;
+    const nodeEl = e.target.closest('.graph-node');
+    const zoneEl = e.target.closest('.graph-zone');
+    const resizeEl = e.target.closest('.zone-resize');
+    const start = { cx: e.clientX, cy: e.clientY };
+    graphState._drewSinceDown = false;
+
+    if (resizeEl && graphState.selected && graphState.selected.kind === 'zone'){
+      const z = graphState.zones.find(x => x.id === graphState.selected.id);
+      if (z){
+        graphState.drag = {
+          type: 'zone-resize', id: z.id, start,
+          orig: { x: z.x, y: z.y, w: z.w, h: z.h },
+        };
+        e.preventDefault(); return;
+      }
+    }
+
+    if (nodeEl && graphState.mode === 'select'){
+      const id = nodeEl.dataset.id;
+      const node = state.treeNodes.find(x => x.id === id);
+      if (node){
+        const wp = screenToWorld(e.clientX, e.clientY);
+        const cur = graphState.layout.nodes.find(p => p.id === id);
+        graphState.drag = {
+          type: 'node', id, start,
+          orig: cur ? { x: cur.x, y: cur.y } : { x: 0, y: 0 },
+          offset: cur ? { x: wp.x - cur.x, y: wp.y - cur.y } : { x: 0, y: 0 },
+        };
+        e.preventDefault(); return;
+      }
+    }
+
+    if (zoneEl && graphState.mode === 'select'){
+      const id = zoneEl.dataset.zoneId;
+      const z = graphState.zones.find(x => x.id === id);
+      if (z){
+        graphState.drag = {
+          type: 'zone-move', id, start,
+          orig: { x: z.x, y: z.y },
+        };
+        e.preventDefault(); return;
+      }
+    }
+
+    if (graphState.mode === 'zone'){
+      const wp = screenToWorld(e.clientX, e.clientY);
+      graphState.drag = {
+        type: 'zone-draw', start, origin: wp,
+        current: { x: wp.x, y: wp.y, w: 0, h: 0 },
+      };
+      e.preventDefault(); return;
+    }
+
+    // Default: pan
+    graphState.drag = {
+      type: 'pan', start,
+      tx: graphState.transform.x,
+      ty: graphState.transform.y,
+    };
     stage.classList.add('dragging');
   });
+
   window.addEventListener('mousemove', (e) => {
-    if (!graphState.drag) return;
-    graphState.transform.x = graphState.drag.tx + (e.clientX - graphState.drag.x);
-    graphState.transform.y = graphState.drag.ty + (e.clientY - graphState.drag.y);
-    applyGraphTransform();
+    const d = graphState.drag;
+    if (!d) return;
+    const dx = e.clientX - d.start.cx;
+    const dy = e.clientY - d.start.cy;
+    if (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD){
+      graphState._drewSinceDown = true;
+    }
+
+    if (d.type === 'pan'){
+      graphState.transform.x = d.tx + dx;
+      graphState.transform.y = d.ty + dy;
+      applyGraphTransform();
+
+    } else if (d.type === 'node'){
+      const wp = screenToWorld(e.clientX, e.clientY);
+      const nx = wp.x - d.offset.x;
+      const ny = wp.y - d.offset.y;
+      // Update the SVG group live
+      const g = svg.querySelector('.graph-node[data-id="' + d.id + '"]');
+      if (g){
+        g.setAttribute('transform',
+          'translate(' + (nx - GRAPH_NODE_W / 2) + ',' + (ny - GRAPH_NODE_H / 2) + ')');
+        g.classList.add('dragging');
+      }
+      // Update edges live
+      const layoutNode = graphState.layout.nodes.find(p => p.id === d.id);
+      if (layoutNode){ layoutNode.x = nx; layoutNode.y = ny }
+      updateLiveEdges(d.id);
+
+    } else if (d.type === 'zone-move'){
+      const z = graphState.zones.find(x => x.id === d.id);
+      if (!z) return;
+      const scale = graphState.transform.k;
+      z.x = d.orig.x + dx / scale;
+      z.y = d.orig.y + dy / scale;
+      const zEl = svg.querySelector('.graph-zone[data-zone-id="' + d.id + '"] rect');
+      const zT  = svg.querySelector('.graph-zone[data-zone-id="' + d.id + '"] text');
+      const zH  = svg.querySelector('.graph-zone[data-zone-id="' + d.id + '"] .zone-resize');
+      if (zEl){ zEl.setAttribute('x', z.x); zEl.setAttribute('y', z.y) }
+      if (zT){ zT.setAttribute('x', z.x + 14); zT.setAttribute('y', z.y + 22) }
+      if (zH){ zH.setAttribute('x', z.x + z.w - 10); zH.setAttribute('y', z.y + z.h - 10) }
+
+    } else if (d.type === 'zone-resize'){
+      const z = graphState.zones.find(x => x.id === d.id);
+      if (!z) return;
+      const scale = graphState.transform.k;
+      z.w = Math.max(60, d.orig.w + dx / scale);
+      z.h = Math.max(40, d.orig.h + dy / scale);
+      const zEl = svg.querySelector('.graph-zone[data-zone-id="' + d.id + '"] rect');
+      const zH  = svg.querySelector('.graph-zone[data-zone-id="' + d.id + '"] .zone-resize');
+      if (zEl){ zEl.setAttribute('width', z.w); zEl.setAttribute('height', z.h) }
+      if (zH){ zH.setAttribute('x', z.x + z.w - 10); zH.setAttribute('y', z.y + z.h - 10) }
+
+    } else if (d.type === 'zone-draw'){
+      const wp = screenToWorld(e.clientX, e.clientY);
+      d.current = {
+        x: Math.min(d.origin.x, wp.x),
+        y: Math.min(d.origin.y, wp.y),
+        w: Math.abs(wp.x - d.origin.x),
+        h: Math.abs(wp.y - d.origin.y),
+      };
+      drawGhostZone(d.current);
+    }
   });
-  window.addEventListener('mouseup', () => {
+
+  window.addEventListener('mouseup', async (e) => {
+    const d = graphState.drag;
     graphState.drag = null;
     stage.classList.remove('dragging');
+    if (!d) return;
+
+    if (d.type === 'node'){
+      const g = svg.querySelector('.graph-node[data-id="' + d.id + '"]');
+      if (g) g.classList.remove('dragging');
+      if (!graphState._drewSinceDown){
+        // treated as click
+        handleNodeClick(d.id, e);
+        return;
+      }
+      // Persist new position
+      const layoutNode = graphState.layout.nodes.find(p => p.id === d.id);
+      const node = state.treeNodes.find(x => x.id === d.id);
+      if (!layoutNode || !node) return;
+      node.graph_x = layoutNode.x;
+      node.graph_y = layoutNode.y;
+      node.manually_positioned = 1;
+      try {
+        const fd = new FormData();
+        fd.append('x', layoutNode.x);
+        fd.append('y', layoutNode.y);
+        fd.append('manual', '1');
+        await api('POST', '/messages/' + d.id + '/position', { form: fd });
+      } catch(err){
+        toast('Save position failed: ' + err.message, 'error');
+      }
+      renderGraph(false);
+
+    } else if (d.type === 'zone-move'){
+      if (!graphState._drewSinceDown){
+        handleZoneClick(d.id, e); return;
+      }
+      const z = graphState.zones.find(x => x.id === d.id);
+      if (!z) return;
+      try {
+        const fd = new FormData();
+        fd.append('x', z.x); fd.append('y', z.y);
+        await api('POST', '/zones/' + d.id, { form: fd });
+      } catch(err){
+        toast('Move zone failed: ' + err.message, 'error');
+      }
+
+    } else if (d.type === 'zone-resize'){
+      const z = graphState.zones.find(x => x.id === d.id);
+      if (!z) return;
+      try {
+        const fd = new FormData();
+        fd.append('w', z.w); fd.append('h', z.h);
+        await api('POST', '/zones/' + d.id, { form: fd });
+      } catch(err){
+        toast('Resize zone failed: ' + err.message, 'error');
+      }
+      renderGraph(false);
+
+    } else if (d.type === 'zone-draw'){
+      removeGhostZone();
+      const c = d.current;
+      if (c.w < 40 || c.h < 30){ return }  // too small, discard
+      const title = await modal({
+        title: 'Name this zone',
+        desc: 'E.g., Real Estate, Trust Governance, Tax Strategy.',
+        placeholder: 'Zone name',
+      });
+      if (title === null){ return }  // cancelled
+      const color = ZONE_PALETTE[graphState.zones.length % ZONE_PALETTE.length];
+      try {
+        const fd = new FormData();
+        fd.append('title', title || 'Untitled zone');
+        fd.append('color', color);
+        fd.append('x', c.x); fd.append('y', c.y);
+        fd.append('w', c.w); fd.append('h', c.h);
+        const res = await api('POST', '/chats/' + state.currentChatId + '/zones', { form: fd });
+        graphState.zones.push({
+          id: res.id, title: title || 'Untitled zone', narrative: null,
+          color, x: c.x, y: c.y, w: c.w, h: c.h,
+        });
+        setGraphMode('select');
+        renderGraph(false);
+        toast('Zone created', 'success');
+      } catch(err){
+        toast('Create zone failed: ' + err.message, 'error');
+      }
+    }
   });
 
   // Zoom
@@ -2175,18 +2932,51 @@ function fitGraphToView(){
     const rect = stage.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
-    // Zoom toward cursor
     t.x = mx - (mx - t.x) * (newK / t.k);
     t.y = my - (my - t.y) * (newK / t.k);
     t.k = newK;
     applyGraphTransform();
   }, { passive: false });
 
-  // Touch pan (single finger)
+  // Double-click empty space -> create topic node
+  stage.addEventListener('dblclick', async (e) => {
+    if (e.target.closest('.graph-node') || e.target.closest('.graph-zone')) return;
+    if (!state.currentChatId){
+      toast('Start a chat first', 'info'); return;
+    }
+    const wp = screenToWorld(e.clientX, e.clientY);
+    const title = await modal({
+      title: 'New topic',
+      desc: 'Creates a container node on the canvas. Send a message later to attach real content under it.',
+      placeholder: 'e.g., Real Estate Holdings',
+    });
+    if (title === null) return;
+    try {
+      const fd = new FormData();
+      fd.append('title', title || 'Untitled topic');
+      fd.append('x', wp.x); fd.append('y', wp.y);
+      const res = await api('POST', '/chats/' + state.currentChatId + '/topic', { form: fd });
+      // Add to local tree
+      state.treeNodes.push({
+        id: res.id, role: 'topic',
+        content_html: '<p><strong>' + escapeHtml(title || 'Untitled topic') + '</strong></p>',
+        content_raw: title || 'Untitled topic',
+        created_at: res.created_at, parent_id: null,
+        graph_x: wp.x, graph_y: wp.y, manually_positioned: 1,
+        custom_title: title || 'Untitled topic', narrative: null,
+      });
+      renderGraph(false);
+      toast('Topic created', 'success');
+    } catch(err){
+      toast('Create topic failed: ' + err.message, 'error');
+    }
+  });
+
+  // Touch
   let touchStart = null;
   stage.addEventListener('touchstart', (e) => {
     if (e.touches.length !== 1) return;
-    if (e.target.closest('.graph-node')) return;
+    if (e.target.closest('.graph-node') || e.target.closest('.graph-zone')) return;
     touchStart = {
       x: e.touches[0].clientX, y: e.touches[0].clientY,
       tx: graphState.transform.x, ty: graphState.transform.y,
@@ -2201,6 +2991,75 @@ function fitGraphToView(){
   stage.addEventListener('touchend', () => { touchStart = null });
 })();
 
+function updateLiveEdges(nodeId){
+  const svg = graphState.svg;
+  const ns = 'http://www.w3.org/2000/svg';
+  const L = graphState.layout;
+  // Recompute paths touching nodeId
+  L.edges.forEach((e, i) => {
+    if (e.from !== nodeId && e.to !== nodeId) return;
+    const p = L.nodes.find(x => x.id === e.from);
+    const c = L.nodes.find(x => x.id === e.to);
+    if (!p || !c) return;
+    e.x1 = p.x; e.y1 = p.y + GRAPH_NODE_H / 2;
+    e.x2 = c.x; e.y2 = c.y - GRAPH_NODE_H / 2;
+    // Find the path SVG node — they're children of rootG in edge order.
+    // Safer: re-serialize all edges by index.
+    const edges = svg.querySelectorAll('path.graph-edge');
+    const path = edges[i];
+    if (path){
+      const midY = (e.y1 + e.y2) / 2;
+      const d = 'M ' + e.x1 + ' ' + e.y1 +
+                ' C ' + e.x1 + ' ' + midY + ', ' +
+                        e.x2 + ' ' + midY + ', ' +
+                        e.x2 + ' ' + e.y2;
+      path.setAttribute('d', d);
+    }
+  });
+}
+
+function drawGhostZone(c){
+  const svg = graphState.svg;
+  const rootG = document.getElementById('graph-root-g');
+  let g = svg.querySelector('#ghost-zone');
+  const ns = 'http://www.w3.org/2000/svg';
+  if (!g){
+    g = document.createElementNS(ns, 'rect');
+    g.setAttribute('id', 'ghost-zone');
+    g.setAttribute('class', 'ghost-zone');
+    g.setAttribute('rx', 14);
+    rootG.appendChild(g);
+  }
+  g.setAttribute('x', c.x); g.setAttribute('y', c.y);
+  g.setAttribute('width', c.w); g.setAttribute('height', c.h);
+}
+function removeGhostZone(){
+  const g = document.querySelector('#ghost-zone');
+  if (g) g.remove();
+}
+
+/* ---------- Click handlers ---------- */
+function handleNodeClick(id, e){
+  if (e && e.shiftKey){
+    setBranchFrom(id, 'child');
+    closeGraphModal();
+    toast('Branch armed. Type your follow-up.', 'info');
+    return;
+  }
+  graphState.selected = { kind: 'node', id };
+  const node = state.treeNodes.find(x => x.id === id);
+  renderGraph(false);
+  openNarrativePanel({ kind: 'node', node });
+}
+
+function handleZoneClick(id, e){
+  graphState.selected = { kind: 'zone', id };
+  const z = graphState.zones.find(x => x.id === id);
+  renderGraph(false);
+  openNarrativePanel({ kind: 'zone', zone: z });
+}
+
+/* ---------- Zoom buttons ---------- */
 document.getElementById('graph-zoom-in').addEventListener('click', () => {
   const t = graphState.transform;
   const stage = graphState.stage;
@@ -2223,11 +3082,159 @@ document.getElementById('graph-zoom-out').addEventListener('click', () => {
 });
 document.getElementById('graph-zoom-fit').addEventListener('click', fitGraphToView);
 
-// Escape to close graph
+// Escape
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && document.getElementById('graph-root').classList.contains('show')){
-    closeGraphModal();
+    if (document.getElementById('narrative-panel').classList.contains('show')){
+      closeNarrativePanel();
+    } else {
+      closeGraphModal();
+    }
   }
+});
+
+/* ===================== Narrative Panel ===================== */
+const narrState = { kind: null, id: null };
+
+function openNarrativePanel({ kind, node, zone }){
+  const panel = document.getElementById('narrative-panel');
+  const titleInput = document.getElementById('narr-title');
+  const narrInput = document.getElementById('narr-text');
+  const kindLabel = document.getElementById('narr-kind');
+  const deleteBtn = document.getElementById('narr-delete');
+  const colorRow  = document.getElementById('narr-color-row');
+  const chatBtn   = document.getElementById('narr-open-chat');
+
+  if (kind === 'node'){
+    narrState.kind = 'node'; narrState.id = node.id;
+    const raw = plainText(node.content_html || '').trim();
+    titleInput.value = node.custom_title || raw.slice(0, 120);
+    narrInput.value = node.narrative || '';
+    kindLabel.textContent = (node.role || 'NODE').toUpperCase();
+    document.getElementById('narr-color-row-wrap').style.display = 'none';
+    deleteBtn.style.display = node.role === 'topic' ? '' : 'none';
+    chatBtn.style.display = '';
+  } else {
+    narrState.kind = 'zone'; narrState.id = zone.id;
+    titleInput.value = zone.title || '';
+    narrInput.value = zone.narrative || '';
+    kindLabel.textContent = 'ZONE';
+    document.getElementById('narr-color-row-wrap').style.display = '';
+    deleteBtn.style.display = '';
+    chatBtn.style.display = 'none';
+    // Build color swatches
+    colorRow.innerHTML = '';
+    ZONE_PALETTE.forEach(c => {
+      const s = document.createElement('button');
+      s.className = 'color-sw';
+      if (c === zone.color) s.classList.add('active');
+      s.style.background = c;
+      s.dataset.color = c;
+      s.addEventListener('click', () => changeZoneColor(zone.id, c));
+      colorRow.appendChild(s);
+    });
+  }
+
+  panel.classList.add('show');
+  setTimeout(() => titleInput.focus(), 50);
+}
+function closeNarrativePanel(){
+  document.getElementById('narrative-panel').classList.remove('show');
+  graphState.selected = null;
+  narrState.kind = null; narrState.id = null;
+  renderGraph(false);
+}
+document.getElementById('narr-close').addEventListener('click', closeNarrativePanel);
+
+async function saveNarrative(){
+  const title = document.getElementById('narr-title').value.trim();
+  const narrative = document.getElementById('narr-text').value;
+  if (narrState.kind === 'node'){
+    const n = state.treeNodes.find(x => x.id === narrState.id);
+    if (!n) return;
+    n.custom_title = title || null;
+    n.narrative = narrative || null;
+    try {
+      const fd = new FormData();
+      if (title !== null) fd.append('custom_title', title);
+      fd.append('narrative', narrative);
+      await api('POST', '/messages/' + narrState.id + '/meta', { form: fd });
+      toast('Saved', 'success');
+      renderGraph(false);
+    } catch(e){ toast('Save failed: ' + e.message, 'error') }
+  } else if (narrState.kind === 'zone'){
+    const z = graphState.zones.find(x => x.id === narrState.id);
+    if (!z) return;
+    z.title = title; z.narrative = narrative || null;
+    try {
+      const fd = new FormData();
+      fd.append('title', title);
+      fd.append('narrative', narrative);
+      await api('POST', '/zones/' + narrState.id, { form: fd });
+      toast('Saved', 'success');
+      renderGraph(false);
+    } catch(e){ toast('Save failed: ' + e.message, 'error') }
+  }
+}
+document.getElementById('narr-save').addEventListener('click', saveNarrative);
+
+async function changeZoneColor(id, color){
+  const z = graphState.zones.find(x => x.id === id);
+  if (!z) return;
+  z.color = color;
+  try {
+    const fd = new FormData();
+    fd.append('color', color);
+    await api('POST', '/zones/' + id, { form: fd });
+    document.querySelectorAll('#narr-color-row .color-sw').forEach(s => {
+      s.classList.toggle('active', s.dataset.color === color);
+    });
+    renderGraph(false);
+  } catch(e){ toast('Color update failed: ' + e.message, 'error') }
+}
+
+document.getElementById('narr-delete').addEventListener('click', async () => {
+  const kind = narrState.kind, id = narrState.id;
+  if (!kind || !id) return;
+  const label = kind === 'zone' ? 'zone' : 'topic';
+  const ok = await modal({
+    title: 'Delete this ' + label + '?',
+    desc: kind === 'zone'
+      ? 'The zone will be removed. Nodes inside are not affected.'
+      : 'The topic node will be removed. Any children are re-parented to its parent.',
+    okLabel: 'Delete',
+  });
+  if (!ok) return;
+  try {
+    if (kind === 'zone'){
+      await api('DELETE', '/zones/' + id);
+      graphState.zones = graphState.zones.filter(z => z.id !== id);
+    } else {
+      await api('DELETE', '/messages/' + id);
+      state.treeNodes = state.treeNodes.filter(n => n.id !== id);
+      // Re-parent children locally
+      state.treeNodes.forEach(n => {
+        if (n.parent_id === id){
+          n.parent_id = null;
+        }
+      });
+    }
+    closeNarrativePanel();
+    renderGraph(false);
+    toast('Deleted', 'success');
+  } catch(e){ toast('Delete failed: ' + e.message, 'error') }
+});
+
+document.getElementById('narr-open-chat').addEventListener('click', () => {
+  if (narrState.kind !== 'node' || !narrState.id) return;
+  const n = state.treeNodes.find(x => x.id === narrState.id);
+  if (!n) return;
+  state.activeLeafId = findDescendantLeaf(n.id);
+  setBranchFrom(n.id, 'child');
+  renderThread();
+  renderTree();
+  closeGraphModal();
+  elInput.focus();
 });
 
 /* ===================== Copy ===================== */
@@ -2254,7 +3261,7 @@ document.getElementById('pf-save').addEventListener('click', () => {
   elPfMsg.textContent = 'Profile saved.';
   elPfMsg.className = 'msg-line success';
   state.currentChatId = null;
-  state.treeNodes = [];
+  state.treeNodes = []; graphState.zones = [];
   state.activeLeafId = null;
   renderThread();
   renderTree();
@@ -2268,7 +3275,7 @@ document.getElementById('pf-logout').addEventListener('click', () => {
   elPfMsg.textContent = 'Logged out.';
   elPfMsg.className = 'msg-line';
   state.currentChatId = null;
-  state.treeNodes = [];
+  state.treeNodes = []; graphState.zones = [];
   state.activeLeafId = null;
   elChatList.innerHTML = '<div class="empty-state">Sign in with your Client ID to begin.</div>';
   renderThread();
@@ -2323,7 +3330,7 @@ async function loadChats(){
               try {
                 await api('DELETE', `/chats/${ch.id}`);
                 if (state.currentChatId === ch.id){
-                  state.currentChatId = null; state.treeNodes = []; state.activeLeafId = null;
+                  state.currentChatId = null; state.treeNodes = []; graphState.zones = []; state.activeLeafId = null;
                   elChatTitle.innerHTML = '<span class="muted">Advisor</span>';
                   renderThread(); renderTree();
                 }
@@ -2356,6 +3363,7 @@ async function openChat(chatId){
     state.currentChatTitle = chatData.chat.title || 'Untitled';
     elChatTitle.innerHTML = escapeHtml(state.currentChatTitle);
     state.treeNodes = treeData.nodes || [];
+    graphState.zones = treeData.zones || [];
     // Default active leaf = most recent descendant path
     const lvs = leaves();
     lvs.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -2372,7 +3380,7 @@ document.getElementById('btn-newchat').addEventListener('click', async () => {
   try{
     const res = await api('POST', '/chats', { form: new FormData() });
     state.currentChatId = res.chat_id;
-    state.treeNodes = [];
+    state.treeNodes = []; graphState.zones = [];
     state.activeLeafId = null;
     elChatTitle.innerHTML = '<span class="muted">New chat</span>';
     renderThread(); renderTree();
@@ -2434,7 +3442,7 @@ async function handleSend(q){
     try{
       const res = await api('POST', '/chats', { form: new FormData() });
       state.currentChatId = res.chat_id;
-      state.treeNodes = [];
+      state.treeNodes = []; graphState.zones = [];
       state.activeLeafId = null;
     } catch(e){
       toast('Failed to create chat: ' + e.message, 'error'); return;
@@ -2487,6 +3495,7 @@ async function handleSend(q){
     // Refresh tree authoritatively
     const treeData = await api('GET', `/chats/${state.currentChatId}/tree`);
     state.treeNodes = treeData.nodes || [];
+    graphState.zones = treeData.zones || [];
 
     // New leaf = latest message descending from our branch parent
     const newestUser = [...state.treeNodes].reverse()
