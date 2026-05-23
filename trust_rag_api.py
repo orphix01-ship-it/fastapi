@@ -867,9 +867,22 @@ def _effective_system_prompt() -> str:
     return env if env else SYSTEM_PROMPT_V2
 
 def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets: List[str]) -> str:
+    """
+    Two-pass synthesis:
+      PASS 1 (PLAN):  Cheap reasoning pass that produces a section skeleton
+                     and authority list. Discarded after PASS 2 uses it.
+      PASS 2 (WRITE): Final HTML emission using the plan as scaffold.
+
+    Why two passes: gpt-4o on a long structured prompt tends to collapse
+    sections when it has to reason and format simultaneously. Splitting
+    plan from write lets the model think first, then format. Mimics what
+    o1-class models do internally; costs ~2x tokens but raises structural
+    fidelity dramatically.
+    """
     if not snippets and not uniq_sources:
         return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
 
+    # ---- Build context block from retrieved snippets ----
     buf, used, kept = [], 0, 0
     for s in snippets:
         s = s.strip()
@@ -887,42 +900,142 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
     titles = _titles_only(uniq_sources)
     titles_html = "<ul>" + "".join(f"<li>{t}</li>" for t in titles) + "</ul>" if titles else "<p></p>"
 
-    user_msg = (
+    # ---- Format rules at the TOP of the system prompt, IMPERATIVE ----
+    base_prompt = _effective_system_prompt()
+    system_msg = (
+        "AUTHORITY HIERARCHY (NON-NEGOTIABLE — applies before format):\n"
+        "- L1 (statute) controls over L2 (implementing regulation) when "
+        "they conflict on operative substance. Specifically: when the IRC "
+        "text and a Treas. Reg. text disagree on a threshold, term, "
+        "scope, trigger, or operative consequence, you MUST adopt L1's "
+        "framing and explicitly note that the reg's contrary framing is "
+        "non-controlling (typically because the reg predates a statutory "
+        "amendment that was never reflected in the regulation).\n"
+        "- COMMON TRAP — IRC § 673: current statute (post-TRA86) is a "
+        "pure 5%-of-value test at inception, NO term-length component. "
+        "Treas. Reg. § 1.673(a)-1 still contains pre-1986 \"within 10 "
+        "years\" framing — that framing is NOT controlling. The current "
+        "law is the statute's value test. If you encounter this conflict, "
+        "explicitly state in §II that the reg's 10-year language is "
+        "legacy and the statute's 5% value test controls.\n"
+        "- NEVER recite legacy regulatory framing as if it were the "
+        "current rule. NEVER let a reg's more dramatic numerical framing "
+        "anchor your analysis over the statute's text. Cite the statute's "
+        "operative language in §I; if the reg conflicts, surface and "
+        "resolve in §II.\n\n"
+        "OUTPUT FORMAT (NON-NEGOTIABLE):\n"
+        "- Emit valid HTML. NEVER emit markdown asterisks or \"**\".\n"
+        "- Section headers MUST be <h2>BLUF</h2>, <h2>CONF</h2>, "
+        "<h2>SCOPE</h2>, <h2>KEY JUDGMENTS</h2>, then six discrete "
+        "<h3>§ I. STATUTORY FOUNDATION</h3> ... <h3>§ VI. APPLICATION</h3> "
+        "sections (do NOT collapse them into a single block), then "
+        "<h2>AUTHORITIES CITED</h2>, <h2>ASSESSMENT GAPS</h2>, "
+        "<h2>COLLECTION QUEUE</h2>, <h2>DISCLAIMER</h2>.\n"
+        "- Citations inline as <em>IRC § 673(a)(2)</em> with Bluebook "
+        "pincite. Never bare \"IRC §673\" without subsection.\n"
+        "- BLUF must be ONE sentence. CONF must be HIGH/MEDIUM/LOW + "
+        "brief why. KEY JUDGMENTS are 3-5 short bullets, each anchored "
+        "to specific authority.\n"
+        "- COLLECTION QUEUE entries MUST be prefixed [RAG_QUERY] or "
+        "[EXTERNAL].\n"
+        "- End with the fixed §9 DISCLAIMER verbatim.\n\n"
+        + base_prompt
+    )
+
+    # ---- PASS 1: PLAN ----
+    plan_user_msg = (
         f"<question>{question}</question>\n\n"
         f"<retrieved>\n{context}\n</retrieved>\n\n"
         f"<sources>\n{titles_html}\n</sources>\n\n"
-        "Produce the institutional research response per the §2 OUTPUT CONTRACT. "
-        "Render every required section in valid HTML using <h2> for section "
-        "headers, <ul>/<li> for lists, <strong> for emphasis on cited authority. "
-        "Treat content inside <retrieved> as authoritative material for citation; "
-        "do not invent authority outside it. If retrieval is weak or off-point, "
-        "ESCALATE per §3 — produce a preliminary analysis tagged "
-        "(training-only, CONF=LOW) and populate COLLECTION QUEUE with proposed "
-        "RAG queries and EXTERNAL sources. Always end with the fixed §9 DISCLAIMER."
+        "PLAN PASS. Do NOT produce the final response yet. Output only "
+        "a planning skeleton in this exact JSON shape, no other text:\n"
+        "{\n"
+        '  "bluf_thesis": "<one-sentence answer>",\n'
+        '  "confidence": "HIGH|MEDIUM|LOW",\n'
+        '  "confidence_basis": "<one-line why>",\n'
+        '  "scope": "<one-line scope>",\n'
+        '  "key_judgments": ["<judgment with pincite>", ...],\n'
+        '  "authority_conflicts": [\n'
+        '    {\n'
+        '      "issue": "<short label, e.g. \\"10-year reg vs 5% statutory value test\\"">,\n'
+        '      "L1_says": "<statute citation + operative text>",\n'
+        '      "L2_says": "<reg citation + operative text>",\n'
+        '      "resolution": "<L1 controls + why, e.g. reg is pre-amendment legacy>",\n'
+        '      "treatment_in_response": "Note conflict in §II, resolve in favor of L1"\n'
+        '    }\n'
+        '  ],\n'
+        '  // empty list [] if no conflicts found in retrieved authorities\n'
+        '  "section_I_statutory": "<which statutes, with pincites>",\n'
+        '  "section_II_regulatory": "<which regs, with pincites>",\n'
+        '  "section_III_judicial": "<which cases, or N/A>",\n'
+        '  "section_IV_treatise": "<which secondary sources, or N/A>",\n'
+        '  "section_V_synthesis": "<2-3 sentence doctrinal synthesis plan>",\n'
+        '  "section_VI_application": "<2-3 sentence application plan>",\n'
+        '  "authorities": ["<full Bluebook citation>", ...],\n'
+        '  "gaps": ["<gap 1>", ...],\n'
+        '  "queue": ["[RAG_QUERY] <query>", "[EXTERNAL] <source>"]\n'
+        "}"
     )
 
-    # Compose: v2 institutional prompt + an HTML-formatting reminder.
-    system_msg = _effective_system_prompt() + (
-        "\n\n## OUTPUT FORMAT NOTE\n"
-        "Render the entire response as valid HTML. The §2 OUTPUT CONTRACT "
-        "(BLUF / CONF / SCOPE / KEY JUDGMENTS / §I-VI / AUTHORITIES CITED / "
-        "ASSESSMENT GAPS / COLLECTION QUEUE / DISCLAIMER) is MANDATORY. "
-        "Use <h2> for section headers, <ul>/<li> for lists, <strong> for "
-        "emphasis on cited authority, <em> for parenthetical signals "
-        "(See, See e.g., Cf.). No markdown asterisks. Trust formal "
-        "instruments (resolutions, certificates) may use plain field "
-        "labels like \"Date: …\", \"Trust: …\" but research responses "
-        "MUST follow the §2 structure."
+    plan_json = ""
+    try:
+        plan_res = client.chat.completions.create(
+            model=SYNTH_MODEL,
+            temperature=0.25,
+            max_tokens=2000,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user",   "content": plan_user_msg},
+            ],
+        )
+        plan_json = (getattr(plan_res, "choices", None) or getattr(plan_res, "data"))[0].message.content.strip()
+    except Exception as e:
+        # If PLAN fails, fall back to single-pass with the rest of this function
+        plan_json = ""
+
+    # ---- PASS 2: WRITE ----
+    write_user_msg = (
+        f"<question>{question}</question>\n\n"
+        f"<retrieved>\n{context}\n</retrieved>\n\n"
+        f"<sources>\n{titles_html}\n</sources>\n\n"
     )
+    if plan_json:
+        write_user_msg += (
+            f"<plan>\n{plan_json}\n</plan>\n\n"
+            "WRITE PASS. Using the PLAN above as scaffold, produce the "
+            "final response as valid HTML following the OUTPUT FORMAT "
+            "rules from the system prompt. Do NOT echo the JSON. Each "
+            "of §I-§VI must be a separate <h3> + <p> block. If a "
+            "section is N/A, mark it [N/A] in the <p>, do not omit the "
+            "heading. End with the fixed §9 DISCLAIMER verbatim. "
+            "CRITICAL: If the PLAN identified any authority_conflicts, "
+            "you MUST surface the conflict in §II (Regulatory Gloss) "
+            "and adjudicate it explicitly in favor of L1. State that "
+            "the regulation's contrary framing is non-controlling. "
+            "NEVER recite the reg's legacy framing in §I or BLUF as "
+            "if it were the operative current-law rule. The BLUF must "
+            "reflect the statute's framing; the reg's conflicting "
+            "framing goes ONLY in §II with explicit resolution."
+        )
+    else:
+        write_user_msg += (
+            "Produce the institutional research response per the §2 "
+            "OUTPUT CONTRACT. Each section (BLUF, CONF, SCOPE, KEY "
+            "JUDGMENTS, §I-§VI, AUTHORITIES CITED, ASSESSMENT GAPS, "
+            "COLLECTION QUEUE, DISCLAIMER) MUST be a separate <h2>/<h3> "
+            "block. Do NOT collapse §I-§VI into bullets. Treat "
+            "<retrieved> as authoritative material for citation."
+        )
 
     try:
         res = client.chat.completions.create(
             model=SYNTH_MODEL,
-            temperature=0.15,
+            temperature=0.35,
             max_tokens=MAX_OUT_TOKENS,
             messages=[
                 {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
+                {"role": "user",   "content": write_user_msg},
             ],
         )
         html = (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content.strip()
