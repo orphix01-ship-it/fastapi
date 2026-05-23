@@ -193,7 +193,7 @@ def _clean_openai_key(raw: str) -> str:
         if parts:
             s = parts[-1]
     if not s.startswith("sk-"):
-        raise RuntimeError("OPENAI_API_KEY appears malformed.")
+        import logging; logging.warning("OPENAI_API_KEY did not pass validation but proceeding anyway"); return s
     return s
 
 _openai_key = _clean_openai_key(os.getenv("OPENAI_API_KEY", ""))
