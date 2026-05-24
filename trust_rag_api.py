@@ -39,6 +39,15 @@ if os.getenv("OPENAI_BASE_URL", "").strip().lower() in ("", "none", "null"):
 
 API_TOKEN         = os.getenv("API_TOKEN", "")
 SYNTH_MODEL       = os.getenv("SYNTH_MODEL", "gpt-4o")
+
+# Actuarial tools — §7520 present value + breakeven (Stage 2 of Option 2)
+try:
+    from actuarial import pv_reversion_factor, breakeven_rate
+    _ACTUARIAL_AVAILABLE = True
+except Exception as _exc:
+    import logging as _logging
+    _logging.warning(f"actuarial module unavailable: {_exc}")
+    _ACTUARIAL_AVAILABLE = False
 MAX_SNIPPETS      = int(os.getenv("MAX_SNIPPETS", "20"))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "24000"))
 MAX_OUT_TOKENS    = int(os.getenv("MAX_OUT_TOKENS", "16384"))
@@ -265,6 +274,215 @@ def _strip_code_fences(html: str) -> str:
             s = s[:-3].rstrip()
         return s
     return s
+
+
+# ==========  ACTUARIAL TOOLS (§7520) ==========
+# These tools let the synthesis model compute IRC §7520 actuarial values
+# during WRITE and CRITIQUE passes. The model decides when to call them
+# based on the question (e.g., "25-year reversion" → call breakeven and PV).
+#
+# All inputs/outputs are JSON-serializable. Decimal results are stringified
+# with enough precision to round-trip cleanly.
+
+ACTUARIAL_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "compute_7520_pv_factor",
+            "description": (
+                "Compute the IRC §7520 present-value factor of a fixed-term "
+                "reversion of corpus — i.e., the fraction of $1 of corpus "
+                "represented by the right to receive the corpus at the end "
+                "of a fixed term, discounted at the §7520 annual rate. "
+                "Used in IRC §673(a) grantor-trust analysis: if the factor "
+                "exceeds 0.05, the reversionary interest triggers grantor "
+                "trust status. Formula: PV = (1 + rate)^(-term_years). "
+                "Always call this when a question involves a fixed-term "
+                "reversion and a §7520 (or comparable) rate. Cite the "
+                "computed value with the rate assumption it depends on."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "term_years": {
+                        "type": "number",
+                        "description": "Years until reversion (positive number). E.g., 25 for a 25-year trust."
+                    },
+                    "rate": {
+                        "type": "number",
+                        "description": "§7520 rate as a decimal (e.g., 0.05 for 5.0%, 0.0727 for 7.27%)."
+                    }
+                },
+                "required": ["term_years", "rate"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compute_7520_breakeven_rate",
+            "description": (
+                "Compute the §7520 rate at which the PV factor of a fixed-term "
+                "reversion of corpus equals a target threshold (default 0.05, "
+                "the IRC §673(a) threshold). Below this rate, the reversion's "
+                "PV exceeds the threshold and grantor trust status applies. "
+                "Closed-form: rate = target^(-1/term_years) - 1. Useful for "
+                "framing a clear conclusion on whether §673 is triggered "
+                "without requiring a specific rate input."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "term_years": {
+                        "type": "number",
+                        "description": "Years until reversion (positive)."
+                    },
+                    "target_pv": {
+                        "type": "number",
+                        "description": "Threshold PV factor. Default 0.05 for IRC §673(a). Use 0.10 for IRC §2702 minority-interest analysis."
+                    }
+                },
+                "required": ["term_years"]
+            }
+        }
+    }
+]
+
+
+def _dispatch_tool_call(name: str, args: dict) -> dict:
+    """
+    Dispatch an OpenAI tool call to the local actuarial module.
+    Returns a JSON-serializable dict that the model receives as the
+    tool result. On error, returns {"error": "..."} so the model can
+    recover gracefully rather than crashing the synthesis pass.
+    """
+    if not _ACTUARIAL_AVAILABLE:
+        return {"error": "actuarial module not available in this build"}
+
+    try:
+        if name == "compute_7520_pv_factor":
+            term = float(args["term_years"])
+            rate = float(args["rate"])
+            factor = pv_reversion_factor(term, rate)
+            return {
+                "input": {"term_years": term, "rate": rate},
+                "pv_factor": float(factor),
+                "pv_factor_decimal": str(factor),
+                "explanation": (
+                    f"For a fixed reversion at year {term} discounted at "
+                    f"{rate * 100:.4f}%, the present-value factor is "
+                    f"{float(factor):.6f} ({float(factor) * 100:.4f}% of corpus). "
+                    f"For IRC §673(a) analysis, compare to the 0.05 threshold."
+                )
+            }
+        elif name == "compute_7520_breakeven_rate":
+            term = float(args["term_years"])
+            target = float(args.get("target_pv", 0.05))
+            br = breakeven_rate(term, target_pv=target)
+            return {
+                "input": {"term_years": term, "target_pv": target},
+                "breakeven_rate": float(br),
+                "breakeven_rate_decimal": str(br),
+                "explanation": (
+                    f"For a {term}-year reversion, the §7520 rate at which the "
+                    f"PV factor equals {target} is {float(br):.6f} "
+                    f"({float(br) * 100:.4f}%). For IRC §673(a) (target=0.05), "
+                    f"any §7520 rate below {float(br) * 100:.4f}% produces a PV "
+                    f"factor above 0.05, triggering grantor trust status."
+                )
+            }
+        else:
+            return {"error": f"unknown tool: {name}"}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+def _run_with_tools(client, model, messages, tools=ACTUARIAL_TOOLS,
+                    max_iters=4, **kw):
+    """
+    Drive an OpenAI Chat Completions call through a multi-turn tool-use
+    loop. Returns the final assistant text content.
+
+    Loop:
+      1. Send messages with tools available
+      2. If response has tool_calls, dispatch each, append results,
+         loop again (max max_iters times to prevent infinite loops)
+      3. When response has no tool_calls, return the text content
+
+    Falls back to a no-tools call if the model errors on the tools
+    parameter (some models or model versions don't accept it).
+    """
+    import json as _json
+    msgs = list(messages)
+
+    for iteration in range(max_iters):
+        try:
+            res = client.chat.completions.create(
+                model=model,
+                messages=msgs,
+                tools=tools,
+                tool_choice="auto",
+                **kw,
+            )
+        except Exception as e:
+            # Model doesn't support tools, or other API error.
+            # Retry once without tools so the synthesis pass still produces
+            # something useful.
+            try:
+                res = client.chat.completions.create(
+                    model=model, messages=msgs, **kw
+                )
+                return (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content
+            except Exception:
+                raise e
+
+        msg = (getattr(res, "choices", None) or getattr(res, "data"))[0].message
+        tool_calls = getattr(msg, "tool_calls", None) or []
+
+        if not tool_calls:
+            return msg.content or ""
+
+        # Append the assistant message with its tool_calls intact
+        # (OpenAI requires the assistant turn to be in messages before
+        # the corresponding tool results)
+        msgs.append({
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    }
+                } for tc in tool_calls
+            ]
+        })
+
+        # Dispatch each tool call locally
+        for tc in tool_calls:
+            try:
+                args = _json.loads(tc.function.arguments)
+            except Exception:
+                args = {}
+            result = _dispatch_tool_call(tc.function.name, args)
+            msgs.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": _json.dumps(result),
+            })
+        # Loop continues, model now sees tool results
+
+    # If we hit max_iters without a clean text response, force one more
+    # call without tools to get text out.
+    try:
+        res = client.chat.completions.create(
+            model=model, messages=msgs, **kw
+        )
+        return (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content or ""
+    except Exception:
+        return ""
 
 
 # ========== SYNTHESIS ==========
@@ -1047,16 +1265,17 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
         )
 
     try:
-        res = client.chat.completions.create(
+        html = _run_with_tools(
+            client=client,
             model=SYNTH_MODEL,
-            temperature=0.35,
-            max_tokens=MAX_OUT_TOKENS,
             messages=[
                 {"role": "system", "content": system_msg},
                 {"role": "user",   "content": write_user_msg},
             ],
+            temperature=0.35,
+            max_tokens=MAX_OUT_TOKENS,
         )
-        html = (getattr(res, "choices", None) or getattr(res, "data"))[0].message.content.strip()
+        html = (html or "").strip()
         if not html:
             return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
         if "<" not in html:
@@ -1096,17 +1315,17 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
         )
 
         try:
-            critique_res = client.chat.completions.create(
+            revised = _run_with_tools(
+                client=client,
                 model=SYNTH_MODEL,
-                temperature=0.25,
-                max_tokens=MAX_OUT_TOKENS,
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user",   "content": critique_user_msg},
                 ],
+                temperature=0.25,
+                max_tokens=MAX_OUT_TOKENS,
             )
-            revised = (getattr(critique_res, "choices", None)
-                       or getattr(critique_res, "data"))[0].message.content.strip()
+            revised = (revised or "").strip()
             if revised and "<" in revised:
                 revised = _strip_code_fences(revised)
                 if "BLUF" in revised and ("§" in revised or "<h3>" in revised.lower()):
