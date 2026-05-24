@@ -249,6 +249,24 @@ def _titles_only(uniq_sources: List[Dict[str, Any]]) -> List[str]:
             out.append(t)
     return out
 
+def _strip_code_fences(html: str) -> str:
+    """Strip ```html ... ``` wrappers some models emit. Idempotent."""
+    if not html:
+        return html
+    s = html.strip()
+    if s.startswith("```html") or s.startswith("```HTML"):
+        s = s[7:].lstrip("\n").rstrip()
+        if s.endswith("```"):
+            s = s[:-3].rstrip()
+        return s
+    if s.startswith("```"):
+        s = s[3:].lstrip("\n").rstrip()
+        if s.endswith("```"):
+            s = s[:-3].rstrip()
+        return s
+    return s
+
+
 # ========== SYNTHESIS ==========
 # =============================================================================
 # V2 INSTITUTIONAL SYSTEM PROMPT  --  used by synthesize_html, /draft, /chat
@@ -1043,6 +1061,59 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
             return "<p>No relevant material found in the Trust-Law knowledge base.</p>"
         if "<" not in html:
             html = "<div><p>" + html.replace("\n", "<br>") + "</p></div>"
+
+        html = _strip_code_fences(html)
+
+        # ---- PASS 3: CRITIQUE ----
+        critique_user_msg = (
+            f"<question>{question}</question>\n\n"
+            f"<retrieved>\n{context}\n</retrieved>\n\n"
+            f"<draft>\n{html}\n</draft>\n\n"
+            "CRITIQUE PASS. Review the draft above against these criteria:\n"
+            "1. OVERCLAIMS: Does the draft assert a conclusion not supportable "
+            "from cited authority? Common pattern: claiming a result 'likely' "
+            "without showing required inputs (actuarial rate, valuation date, "
+            "specific facts). If found, replace the weakest sentence with a "
+            "properly-hedged version naming what's needed to reach a real "
+            "conclusion.\n"
+            "2. MISSING PROCEDURAL VEHICLES: Does the draft invoke a "
+            "substantive rule but omit the procedural mechanism? Example: "
+            "IRC § 673(a) 5% test without IRC § 7520 actuarial "
+            "methodology. If found, add a brief reference in the right "
+            "section.\n"
+            "3. HALLUCINATED CITATIONS: Any AUTHORITIES CITED entry not "
+            "actually quoted in §I-§VI? Remove. Add explicit [N/A] "
+            "markers to empty Authority Type buckets (Statutes/Regs/Admin/"
+            "Cases/Treatises/International).\n"
+            "4. STRUCTURAL BREAKS: Each of §I-§VI must be a separate "
+            "<h3>+<p>. Mark empty sections [N/A] but never omit heading.\n"
+            "5. ASSESSMENT GAPS: If analysis depended on unstated facts, the "
+            "gaps section MUST list what's missing - never [N/A].\n"
+            "6. DISCLAIMER: Verbatim text from system prompt, no paraphrase.\n\n"
+            "Output the REVISED HTML response in full. NO code fences "
+            "(no \"\\u0060\\u0060\\u0060html\"). No meta-commentary. Emit clean "
+            "final HTML that supersedes the draft."
+        )
+
+        try:
+            critique_res = client.chat.completions.create(
+                model=SYNTH_MODEL,
+                temperature=0.25,
+                max_tokens=MAX_OUT_TOKENS,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user",   "content": critique_user_msg},
+                ],
+            )
+            revised = (getattr(critique_res, "choices", None)
+                       or getattr(critique_res, "data"))[0].message.content.strip()
+            if revised and "<" in revised:
+                revised = _strip_code_fences(revised)
+                if "BLUF" in revised and ("§" in revised or "<h3>" in revised.lower()):
+                    return revised
+        except Exception:
+            pass
+
         return html
     except Exception as e:
         return f"<p><em>(Synthesis unavailable: {e})</em></p>"
