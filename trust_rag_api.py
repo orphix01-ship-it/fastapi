@@ -397,8 +397,42 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+ACTUARIAL_KEYWORDS = (
+    # Statutory triggers
+    "§ 673", "§673", "section 673", "irc 673", "i.r.c. 673",
+    "§ 7520", "§7520", "section 7520", "irc 7520",
+    "§ 2702", "§2702", "section 2702",
+    # Substantive concept triggers
+    "reversionary", "reversion", "remainder interest",
+    "actuarial", "actuarially", "actuarial value",
+    "present value", "pv factor",
+    "breakeven", "break-even", "break even",
+    "grantor trust", "grantor-trust",
+    "5 percent", "5% threshold", "five percent",
+    # Specific structure triggers
+    "grat", "crat", "crut", "qprt", "gst",
+)
+
+
+def _question_needs_tools(question: str) -> bool:
+    """
+    Heuristic: does this question involve content where an actuarial
+    computation would meaningfully improve the answer?
+
+    Returns True if the question mentions §673, §7520, reversionary
+    interests, actuarial value, PV factors, or grantor trust analysis.
+
+    When True, we force tool_choice='required' on the WRITE pass so the
+    model can't dodge into a qualitative answer.
+    """
+    if not question:
+        return False
+    q = question.lower()
+    return any(kw in q for kw in ACTUARIAL_KEYWORDS)
+
+
 def _run_with_tools(client, model, messages, tools=ACTUARIAL_TOOLS,
-                    max_iters=4, **kw):
+                    tool_choice="auto", max_iters=4, **kw):
     """
     Drive an OpenAI Chat Completions call through a multi-turn tool-use
     loop. Returns the final assistant text content.
@@ -417,11 +451,17 @@ def _run_with_tools(client, model, messages, tools=ACTUARIAL_TOOLS,
 
     for iteration in range(max_iters):
         try:
+            # On the first iteration use the requested tool_choice
+            # (typically 'required' for actuarial questions). After the
+            # first tool call has been made and dispatched, fall back to
+            # 'auto' so the model can produce its final text on the next
+            # turn without being forced to call yet another tool.
+            _tc = tool_choice if iteration == 0 else "auto"
             res = client.chat.completions.create(
                 model=model,
                 messages=msgs,
                 tools=tools,
-                tool_choice="auto",
+                tool_choice=_tc,
                 **kw,
             )
         except Exception as e:
@@ -1265,6 +1305,25 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
         )
 
     try:
+        # Force tool use for actuarially-loaded questions. The model often
+        # produces qualitative answers ("you need §7520") instead of computing,
+        # so we make it call at least one tool before generating final text.
+        _needs_tools = _question_needs_tools(question)
+        if _needs_tools:
+            write_user_msg = (
+                write_user_msg + "\n\n"
+                "ACTUARIAL TOOL REQUIREMENT: This question involves a "
+                "computation under IRC § 673 / § 7520 / actuarial value. "
+                "Before writing final text, you MUST call "
+                "compute_7520_breakeven_rate (and compute_7520_pv_factor for "
+                "any specific rate mentioned). Incorporate the computed "
+                "number into § V (Synthesis) or § VI (Application) with a "
+                "clear numeric statement, e.g. \"the breakeven § 7520 rate "
+                "for a 25-year reversion is 12.7304%\". Do not produce a final "
+                "answer that merely references the need for actuarial "
+                "computation without performing it."
+            )
+
         html = _run_with_tools(
             client=client,
             model=SYNTH_MODEL,
@@ -1272,6 +1331,7 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
                 {"role": "system", "content": system_msg},
                 {"role": "user",   "content": write_user_msg},
             ],
+            tool_choice=("required" if _needs_tools else "auto"),
             temperature=0.35,
             max_tokens=MAX_OUT_TOKENS,
         )
