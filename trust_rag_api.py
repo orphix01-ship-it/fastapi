@@ -4794,6 +4794,54 @@ def diag():
         info["error"] = str(e)
     return info
 
+
+@app.get("/diag/postgres")
+def _diag_postgres_endpoint():
+    """Returns detailed Postgres connection diagnostics, including actual error."""
+    out = {
+        "has_DATABASE_URL": bool(os.getenv("DATABASE_URL")),
+        "has_psycopg2": False,
+        "connect_attempted": False,
+        "connect_ok": False,
+        "query_ok": False,
+        "section_count": 0,
+        "url_host_visible": None,
+        "error": None,
+    }
+    try:
+        import psycopg2
+        out["has_psycopg2"] = True
+    except Exception as e:
+        out["error"] = f"psycopg2 import failed: {e}"
+        return out
+
+    db_url = os.getenv("DATABASE_URL", "")
+    if db_url and "@" in db_url:
+        try:
+            out["url_host_visible"] = db_url.split("@", 1)[1].split("/")[0]
+        except Exception:
+            pass
+
+    if not db_url:
+        out["error"] = "DATABASE_URL is empty"
+        return out
+
+    try:
+        out["connect_attempted"] = True
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        out["connect_ok"] = True
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT count(*) FROM irc_sections")
+            out["section_count"] = cur.fetchone()[0]
+            out["query_ok"] = True
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+    return out
+
 # ========== /search (raw context) ==========
 @app.get("/search")
 def search_endpoint(
