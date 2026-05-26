@@ -14,6 +14,13 @@ from fastapi import FastAPI, Query, Header, HTTPException, UploadFile, File, For
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pinecone import Pinecone
+
+# Layer 1 statutory graph (lazy-loaded, silent fallback)
+try:
+    import irc_graph_lib
+except Exception:
+    irc_graph_lib = None
+
 from openai import OpenAI
 import httpx, zipfile, io, re, os, time, traceback, sqlite3, json, uuid
 from datetime import datetime
@@ -429,6 +436,58 @@ def _question_needs_tools(question: str) -> bool:
         return False
     q = question.lower()
     return any(kw in q for kw in ACTUARIAL_KEYWORDS)
+
+
+def _build_graph_enrichment_block(chunks) -> str:
+    """Build a graph-enrichment block for the WRITE pass. No-op unless
+    ENABLE_GRAPH_ENRICHMENT env var is true AND graph is reachable."""
+    if os.environ.get("ENABLE_GRAPH_ENRICHMENT", "").lower() not in ("true", "1", "yes"):
+        return ""
+    if irc_graph_lib is None:
+        return ""
+
+    try:
+        seen = []
+        seen_set = set()
+        for chunk in chunks:
+            meta = chunk.get("metadata") if isinstance(chunk, dict) else None
+            if meta is None and hasattr(chunk, "metadata"):
+                meta = chunk.metadata
+            if not meta:
+                continue
+            section_id = irc_graph_lib.resolve_chunk_to_section(meta)
+            if section_id and section_id not in seen_set:
+                seen.append(section_id)
+                seen_set.add(section_id)
+                if len(seen) >= 6:
+                    break
+
+        if not seen:
+            return ""
+
+        lines = ["[GRAPH CONTEXT — Reference only; do not cite specific subsection "
+                 "text unless that section's text was directly retrieved above]"]
+
+        for section_id in seen:
+            ctx = irc_graph_lib.get_section_context(section_id)
+            outbound = irc_graph_lib.get_outbound_refs(section_id, min_conf=1.0, in_corpus_only=True, limit=4)
+            inbound = irc_graph_lib.get_inbound_refs(section_id, min_conf=1.0, in_corpus_only=True, limit=4)
+
+            if not ctx and not outbound and not inbound:
+                continue
+
+            line = f"- {ctx}" if ctx else f"- {section_id}"
+            if outbound:
+                line += "\n    Cites: " + ", ".join(f"{r['citation']} (in corpus)" for r in outbound) + "."
+            if inbound:
+                line += "\n    Cited by: " + ", ".join(f"{r['citation']} (in corpus)" for r in inbound) + "."
+            lines.append(line)
+
+        if len(lines) <= 1:
+            return ""
+        return "\n".join(lines) + "\n\n"
+    except Exception:
+        return ""
 
 
 def _run_with_tools(client, model, messages, tools=ACTUARIAL_TOOLS,
@@ -1199,6 +1258,16 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
         "anchor your analysis over the statute's text. Cite the statute's "
         "operative language in §I; if the reg conflicts, surface and "
         "resolve in §II.\n\n"
+        "GRAPH CONTEXT RULE (when [GRAPH CONTEXT] block is present above):\n"
+        "- The graph-context block provides structural and citation-chain "
+        "awareness ONLY. You MAY mention sections listed in \"Cites:\" or "
+        "\"Cited by:\" to demonstrate the authority chain. You MUST NOT "
+        "quote, paraphrase, or assert specific subsection text from those "
+        "cross-referenced sections unless that section's text appears in "
+        "the retrieved chunks block. Cross-references are metadata, not "
+        "authority. If a cross-referenced section would materially change "
+        "the analysis, note in COLLECTION QUEUE that retrieving its text "
+        "is needed.\n\n"
         "OUTPUT FORMAT (NON-NEGOTIABLE):\n"
         "- Emit valid HTML. NEVER emit markdown asterisks or \"**\".\n"
         "- Section headers MUST be <h2>BLUF</h2>, <h2>CONF</h2>, "
@@ -1305,6 +1374,12 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
         )
 
     try:
+        # Phase 3: graph enrichment (no-op unless ENABLE_GRAPH_ENRICHMENT=true)
+        _chunks_for_graph = retrieved_chunks if "retrieved_chunks" in locals() else []
+        _graph_block = _build_graph_enrichment_block(_chunks_for_graph)
+        if _graph_block:
+            write_user_msg = _graph_block + write_user_msg
+
         # Force tool use for actuarially-loaded questions. The model often
         # produces qualitative answers ("you need §7520") instead of computing,
         # so we make it call at least one tool before generating final text.
@@ -4704,6 +4779,11 @@ def diag():
         "PINECONE_HOST":  host or None,
         "NO_PROXY": os.getenv("NO_PROXY"),
         "db_path": DB_PATH,
+        "has_DATABASE_URL": bool(os.getenv("DATABASE_URL")),
+        "graph_enrichment_enabled": os.getenv("ENABLE_GRAPH_ENRICHMENT", "").lower() in ("true","1","yes"),
+        "graph_postgres_ok": (irc_graph_lib.is_available() if irc_graph_lib else False),
+        "graph_sections": (irc_graph_lib.get_section_count() if irc_graph_lib else 0),
+        "graph_edges": (irc_graph_lib.get_cross_ref_count() if irc_graph_lib else 0),
     }
     try:
         lst = pc.list_indexes()

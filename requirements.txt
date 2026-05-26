@@ -7,3 +7,4 @@ pinecone-client==5.0.1
 python-dotenv==1.0.1
 prometheus-fastapi-instrumentator==6.1.0
 httpx==0.28.1
+psycopg2-binary>=2.9
