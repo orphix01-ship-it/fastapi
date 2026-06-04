@@ -588,7 +588,7 @@ def _run_with_tools(client, model, messages, tools=ACTUARIAL_TOOLS,
 # =============================================================================
 # V2 INSTITUTIONAL SYSTEM PROMPT  --  used by synthesize_html, /draft, /chat
 # =============================================================================
-# This enforces the §2 output contract (BLUF/CONF/SCOPE/KEY JUDGMENTS/
+# This enforces the §2 output contract (lead sentence/confidence-scope line/KEY JUDGMENTS/
 # §I-VI/AUTHORITIES/GAPS/QUEUE/DISCLAIMER), the Bluebook pincite standard,
 # the L1-L5 authority hierarchy, the refusal/escalation logic, the banned
 # phrases list, and the fixed disclaimer.
@@ -612,11 +612,9 @@ You operate in **legal register with intelligence-community output discipline.**
 Every substantive research response **MUST** follow this exact structure. No exceptions. No rearrangement. No omission of required sections (mark `[N/A]` if a section is inapplicable and explain why in one line).
 
 ```
-═══════════════════════════════════════════════════════
-BLUF:     [One sentence. The answer. No hedge qualifiers.]
-CONF:     [HIGH / MEDIUM / LOW] — [basis in one clause]
-SCOPE:    [Domestic / Offshore-<juris> / Cross-border / Banking-AML]
-═══════════════════════════════════════════════════════
+[Lead sentence — one sentence. The answer. No hedge qualifiers. No label or prefix.]
+
+*[High / Medium / Low] confidence — [basis in one clause]. Scope: [Domestic / Offshore-<juris> / Cross-border / Banking-AML].*
 
 KEY JUDGMENTS
   • [Terse doctrinal conclusion, with inline pincite]
@@ -680,7 +678,7 @@ DISCLAIMER
 [fixed text — §9 below]
 ```
 
-For **non-research** queries (ops questions, drafting requests, quick lookups), you MAY skip the full structure and respond in compressed form, but you MUST still supply: BLUF, confidence, pincites for any legal claim, and the disclaimer.
+For **non-research** queries (ops questions, drafting requests, quick lookups), you MAY skip the full structure and respond in compressed form, but you MUST still supply: lead sentence with the answer, confidence and scope note, pincites for any legal claim, and the disclaimer.
 
 ---
 
@@ -991,7 +989,7 @@ The following phrases are **banned** from all outputs. They are symptoms of slop
 - Emoji of any kind.
 - First-person "I" except when describing your own retrieval steps ("I called `/rag` with query X and retrieved Y").
 
-Required phrases appear only where structurally required: BLUF header, CONF grade, section labels.
+Required phrases appear only where structurally required: lead sentence, confidence/scope line, section labels.
 
 **Hedging discipline.** State confidence explicitly via the CONF field. Do not hedge inside propositions. "Arguably" and "potentially" are banned except where the law itself is genuinely unsettled — and when used, must be followed by an explanation of WHY it is unsettled (circuit split, pending guidance, no on-point authority).
 
@@ -1042,14 +1040,11 @@ confirming currency, accuracy, and applicability to specific facts.
 The following is a canonical response shape. Calibrate to this.
 
 ```
-═══════════════════════════════════════════════════════
-BLUF:   A Cook Islands international trust does not of itself prevent
-        grantor-trust classification under IRC §§ 671–679 when the US
-        settlor retains powers described in §§ 673–677 or where foreign-trust
-        attribution rules of § 679 apply.
-CONF:   HIGH — primary authority dense and settled.
-SCOPE:  Cross-border (US federal trust tax × Cook Islands).
-═══════════════════════════════════════════════════════
+A Cook Islands international trust does not of itself prevent grantor-trust
+classification under IRC §§ 671–679 when the US settlor retains powers
+described in §§ 673–677 or where foreign-trust attribution rules of § 679 apply.
+
+*High confidence — primary authority dense and settled. Scope: Cross-border (US federal trust tax × Cook Islands).*
 
 KEY JUDGMENTS
   • IRC § 679 attributes income of a foreign trust with a US beneficiary
@@ -1270,16 +1265,17 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
         "is needed.\n\n"
         "OUTPUT FORMAT (NON-NEGOTIABLE):\n"
         "- Emit valid HTML. NEVER emit markdown asterisks or \"**\".\n"
-        "- Section headers MUST be <h2>BLUF</h2>, <h2>CONF</h2>, "
-        "<h2>SCOPE</h2>, <h2>KEY JUDGMENTS</h2>, then six discrete "
+        "- Open with a lead <p> paragraph that IS the answer (no header above it). "
+        "Immediately follow with <p><em>...</em></p> stating confidence and scope. "
+        "Then <h2>KEY JUDGMENTS</h2>, then six discrete "
         "<h3>§ I. STATUTORY FOUNDATION</h3> ... <h3>§ VI. APPLICATION</h3> "
         "sections (do NOT collapse them into a single block), then "
         "<h2>AUTHORITIES CITED</h2>, <h2>ASSESSMENT GAPS</h2>, "
         "<h2>COLLECTION QUEUE</h2>, <h2>DISCLAIMER</h2>.\n"
         "- Citations inline as <em>IRC § 673(a)(2)</em> with Bluebook "
         "pincite. Never bare \"IRC §673\" without subsection.\n"
-        "- BLUF must be ONE sentence. CONF must be HIGH/MEDIUM/LOW + "
-        "brief why. KEY JUDGMENTS are 3-5 short bullets, each anchored "
+        "- Lead sentence must be ONE sentence stating the answer. The italic confidence/scope line must state High/Medium/Low confidence with brief why, then a scope clause. "
+        "KEY JUDGMENTS are 3-5 short bullets, each anchored "
         "to specific authority.\n"
         "- COLLECTION QUEUE entries MUST be prefixed [RAG_QUERY] or "
         "[EXTERNAL].\n"
@@ -1295,7 +1291,7 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
         "PLAN PASS. Do NOT produce the final response yet. Output only "
         "a planning skeleton in this exact JSON shape, no other text:\n"
         "{\n"
-        '  "bluf_thesis": "<one-sentence answer>",\n'
+        '  "answer_thesis": "<one-sentence answer>",\n'
         '  "confidence": "HIGH|MEDIUM|LOW",\n'
         '  "confidence_basis": "<one-line why>",\n'
         '  "scope": "<one-line scope>",\n'
@@ -1358,15 +1354,15 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
             "you MUST surface the conflict in §II (Regulatory Gloss) "
             "and adjudicate it explicitly in favor of L1. State that "
             "the regulation's contrary framing is non-controlling. "
-            "NEVER recite the reg's legacy framing in §I or BLUF as "
-            "if it were the operative current-law rule. The BLUF must "
+            "NEVER recite the reg's legacy framing in §I or in the lead sentence as "
+            "if it were the operative current-law rule. The lead sentence must "
             "reflect the statute's framing; the reg's conflicting "
             "framing goes ONLY in §II with explicit resolution."
         )
     else:
         write_user_msg += (
             "Produce the institutional research response per the §2 "
-            "OUTPUT CONTRACT. Each section (BLUF, CONF, SCOPE, KEY "
+            "OUTPUT CONTRACT. Each section (lead sentence, confidence/scope line, KEY "
             "JUDGMENTS, §I-§VI, AUTHORITIES CITED, ASSESSMENT GAPS, "
             "COLLECTION QUEUE, DISCLAIMER) MUST be a separate <h2>/<h3> "
             "block. Do NOT collapse §I-§VI into bullets. Treat "
@@ -1444,17 +1440,17 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
             "5. ASSESSMENT GAPS: If analysis depended on unstated facts, the "
             "gaps section MUST list what's missing - never [N/A].\n"
             "6. DISCLAIMER: Verbatim text from system prompt, no paraphrase.\n"
-            "7. INTERNAL CONSISTENCY: BLUF, KEY JUDGMENTS, §V (Synthesis), "
+            "7. INTERNAL CONSISTENCY: the lead sentence, KEY JUDGMENTS, §V (Synthesis), "
             "and §VI (Application) MUST reach the same conclusion. If they "
-            "disagree on the bottom-line answer (e.g., BLUF says \"does not "
+            "disagree on the bottom-line answer (e.g., lead sentence says \"does not "
             "trigger\" while §VI says \"triggers\"), the section containing "
             "computed actuarial numbers or specific facts controls. Rewrite "
-            "the BLUF to match the analysis, never the other way around. The "
-            "BLUF should state the actual computed result (e.g., \"at the "
+            "the lead sentence to match the analysis, never the other way around. The "
+            "lead sentence should state the actual computed result (e.g., \"at the "
             "current 5% §7520 rate, the 25-year reversion has a PV factor of "
             "29.5%, exceeding the 5% threshold and triggering grantor trust "
             "status; this conclusion flips if the §7520 rate rises above "
-            "12.73%\"). NEVER let the BLUF assert the opposite of what §VI "
+            "12.73%\"). NEVER let the lead sentence assert the opposite of what §VI "
             "computes.\n\n"
             "8. NUMERIC DIRECTION CHECK (actuarial / threshold questions): "
             "If the analysis involves a present-value factor, breakeven rate, "
@@ -1478,15 +1474,15 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
             "exceeds the 5% threshold\") followed by a conclusion (e.g., "
             "\"triggers grantor trust status\" or \"does not trigger\") "
             "MUST have premise and conclusion pointing the same direction. "
-            "If your BLUF says \"PV factor EXCEEDS 5% threshold\" the "
+            "If the lead sentence says \"PV factor EXCEEDS 5% threshold\" the "
             "conclusion MUST be \"TRIGGERS\" (because exceeding the 5% "
-            "threshold IS the trigger under IRC § 673(a)). If your BLUF says "
+            "threshold IS the trigger under IRC § 673(a)). If the lead sentence says "
             "\"PV factor is BELOW 5% threshold\", the conclusion MUST be "
             "\"does NOT trigger\". A sentence like \"does not trigger... as "
             "the PV factor exceeds the 5% threshold\" is internally "
             "self-contradictory and must be fixed. The contradiction is "
             "EASY TO MISS because the premise and conclusion sound "
-            "structurally similar; read each BLUF sentence twice and confirm "
+            "structurally similar; read the lead sentence twice and confirm "
             "the trigger/no-trigger conclusion logically follows from the "
             "exceeds/below-threshold premise. The conjunction \"as\" or "
             "\"because\" introduces a CAUSE, not an exception — the cause "
@@ -1520,7 +1516,7 @@ def synthesize_html(question: str, uniq_sources: List[Dict[str, Any]], snippets:
             revised = (revised or "").strip()
             if revised and "<" in revised:
                 revised = _strip_code_fences(revised)
-                if "BLUF" in revised and ("§" in revised or "<h3>" in revised.lower()):
+                if ("KEY JUDGMENTS" in revised or "key judgments" in revised.lower()) and ("§" in revised or "<h3>" in revised.lower()):
                     return revised
         except Exception:
             pass
